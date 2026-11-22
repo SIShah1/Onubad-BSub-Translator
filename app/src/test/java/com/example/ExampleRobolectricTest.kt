@@ -73,6 +73,7 @@ import com.example.logging.TranslationLogger
 import com.example.logging.WorkManagerDiagnosticTree
 import com.example.service.SubtitleTranslationService
 import com.example.service.SubtitleTranslationServiceResult
+import com.example.ui.components.ContextAwareTranslationCard
 import com.example.ui.screens.StudioScreen
 import com.example.ui.screens.SubtitlePreviewScreen
 import com.example.ui.screens.fitHeroTitleFontSizeSp
@@ -93,6 +94,7 @@ import com.example.ui.viewmodel.SubtitlePreviewState
 import com.example.worker.SubtitleTranslationWorker
 import com.example.worker.TranslationWorkScheduler
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -2369,5 +2371,169 @@ class ExampleRobolectricTest {
       assertTrue(promptsSentToApi[0].contains("English line 11"))
       assertTrue(promptsSentToApi[0].contains("English line 20"))
       assertEquals(20, result.outputData.getInt(SubtitleTranslationWorker.KEY_COMPLETED_BLOCKS, 0))
+    }
+
+  @Test
+  fun `context lines setting defaults to 50 persists updates and adjusts via settings stepper UI`() =
+    runBlocking {
+      app.settingsRepository.setContextLines(ParamMode.DEFAULT, 50)
+      val initial = app.settingsRepository.getSettingsSnapshot()
+      assertEquals(ParamMode.DEFAULT, initial.contextLinesMode)
+      assertEquals(50, initial.effectiveContextLines)
+
+      composeTestRule.setContent {
+        val currentSettings by
+          app.settingsRepository.settingsFlow.collectAsState(initial = AppSettings())
+        val scope = androidx.compose.runtime.rememberCoroutineScope()
+        BSubTranslatorTheme {
+          ContextAwareTranslationCard(
+            settings = currentSettings,
+            onSetContextLines = { mode, value ->
+              scope.launch {
+                app.settingsRepository.setContextLines(mode, value)
+              }
+            },
+          )
+        }
+      }
+
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithTag("context_lines_value_text").assertTextEquals("50 lines")
+
+      // Increase from default 50 -> 60 (switches to MANUAL)
+      composeTestRule.onNodeWithTag("context_lines_increase_button").performClick()
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        try {
+          composeTestRule.onNodeWithTag("context_lines_value_text").assertTextEquals("60 lines")
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+
+      // Decrease 60 -> 50 -> 40
+      composeTestRule.onNodeWithTag("context_lines_decrease_button").performClick()
+      composeTestRule.onNodeWithTag("context_lines_decrease_button").performClick()
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        try {
+          composeTestRule.onNodeWithTag("context_lines_value_text").assertTextEquals("40 lines")
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+
+      // Custom input updates limit
+      composeTestRule.onNodeWithTag("manual_context_lines_input").performTextReplacement("120")
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        try {
+          composeTestRule.onNodeWithTag("context_lines_value_text").assertTextEquals("120 lines")
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+
+      val persisted = app.settingsRepository.getSettingsSnapshot()
+      assertEquals(ParamMode.MANUAL, persisted.contextLinesMode)
+      assertEquals(120, persisted.effectiveContextLines)
+    }
+
+  @Test
+  fun `context-aware translation sends surrounding lines per batch and skips when context lines is zero`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSyContextTestKey_1234567890", "Primary")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 2)
+      app.settingsRepository.setContextLines(ParamMode.MANUAL, 4)
+
+      val rawSrt =
+        (1..4).joinToString("\n\n") { idx ->
+          "$idx\n00:00:0$idx,000 --> 00:00:0$idx,800\nLine number $idx"
+        }
+
+      val capturedRequests = mutableListOf<GeminiGenerateContentRequest>()
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            capturedRequests.add(request)
+            val batchPrompt = request.contents.last().parts.first().text.orEmpty()
+            val blocks = com.example.srt.SrtParser.parseBlocks(batchPrompt)
+            val reply =
+              blocks.joinToString("\n\n") { b ->
+                "${b.index}\n${b.timestamp}\nবাংলা ${b.index}"
+              }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = reply))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockService)
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val result =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "context_demo.srt",
+          chunkSizeOverride = 2,
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue(result is SubtitleTranslationServiceResult.Success)
+      assertEquals(2, capturedRequests.size)
+
+      // Batch 1 receives cues 3..4 as following context
+      val batch1Context = capturedRequests[0].contents.first().parts.first().text.orEmpty()
+      assertTrue(batch1Context.contains("SURROUNDING DIALOGUE CONTEXT"))
+      assertTrue(batch1Context.contains("Line number 3"))
+      assertTrue(batch1Context.contains("Line number 4"))
+
+      // Batch 2 receives cues 1..2 as preceding context including their Bengali translations
+      val batch2Context = capturedRequests[1].contents.first().parts.first().text.orEmpty()
+      assertTrue(batch2Context.contains("SURROUNDING DIALOGUE CONTEXT"))
+      assertTrue(batch2Context.contains("Line number 1"))
+      assertTrue(batch2Context.contains("বাংলা 1"))
+      assertTrue(batch2Context.contains("Line number 2"))
+
+      // When Context Lines = 0, no context turn is sent
+      capturedRequests.clear()
+      app.settingsRepository.setContextLines(ParamMode.MANUAL, 0)
+      val disabledResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "context_off.srt",
+          chunkSizeOverride = 2,
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue(disabledResult is SubtitleTranslationServiceResult.Success)
+      assertEquals(2, capturedRequests.size)
+      assertEquals(1, capturedRequests[0].contents.size)
+      assertEquals(1, capturedRequests[1].contents.size)
     }
 }

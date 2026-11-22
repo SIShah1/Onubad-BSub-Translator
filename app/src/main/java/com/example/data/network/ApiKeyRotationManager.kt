@@ -229,6 +229,7 @@ class ApiKeyRotationManager(
     retryIntervalSeconds: Int,
     cooldownMinutes: Int,
     workId: String? = null,
+    surroundingContext: String = "",
     validateOutput: (String) -> BatchValidationOutcome<T>,
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
@@ -327,6 +328,7 @@ class ApiKeyRotationManager(
             batchIndex = batchIndex,
             totalBatches = totalBatches,
             fileName = fileName,
+            surroundingContext = surroundingContext,
           )
 
         when (apiResult) {
@@ -539,6 +541,7 @@ class ApiKeyRotationManager(
     totalBatches: Int = 1,
     fileName: String = "subtitle.srt",
     workId: String? = null,
+    surroundingContext: String = "",
     onRetryDelay: suspend (seconds: Int, prefix: String) -> Unit = { seconds, _ ->
       for (remaining in seconds downTo 1) {
         currentCoroutineContext().ensureActive()
@@ -568,6 +571,7 @@ class ApiKeyRotationManager(
       retryIntervalSeconds = settings.effectiveRetryIntervalSeconds,
       cooldownMinutes = settings.effectiveCooldownMinutes,
       workId = workId,
+      surroundingContext = surroundingContext,
       validateOutput = { raw ->
         if (raw.isBlank()) BatchValidationOutcome.Invalid("Empty response from Gemini")
         else BatchValidationOutcome.Valid(raw)

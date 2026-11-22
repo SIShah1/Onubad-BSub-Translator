@@ -92,8 +92,12 @@ object DefaultConfig {
   const val MAX_ATTEMPTS_PER_KEY = 3
   const val COOLDOWN_MINUTES = 30
   const val DEFAULT_SUFFIX = "_BSub"
+  const val CONTEXT_LINES = 50
+  const val MIN_CONTEXT_LINES = 0
+  const val MAX_CONTEXT_LINES = 500
 
   val PRESET_CHUNK_SIZES = listOf(100, 150, 200, 300)
+  val PRESET_CONTEXT_LINES = listOf(0, 25, 50, 100, 150)
 
   val BUILT_IN_PROMPT =
     """
@@ -140,6 +144,8 @@ data class AppSettings(
   val manualMaxAttemptsPerKey: Int = DefaultConfig.MAX_ATTEMPTS_PER_KEY,
   val cooldownMode: ParamMode = ParamMode.DEFAULT,
   val manualCooldownMinutes: Int = DefaultConfig.COOLDOWN_MINUTES,
+  val contextLinesMode: ParamMode = ParamMode.DEFAULT,
+  val manualContextLines: Int = DefaultConfig.CONTEXT_LINES,
 ) {
   val effectivePrompt: String
     get() =
@@ -203,6 +209,14 @@ data class AppSettings(
         manualCooldownMinutes.coerceIn(1, 180)
       } else {
         DefaultConfig.COOLDOWN_MINUTES
+      }
+
+  val effectiveContextLines: Int
+    get() =
+      if (contextLinesMode == ParamMode.MANUAL) {
+        manualContextLines.coerceIn(DefaultConfig.MIN_CONTEXT_LINES, DefaultConfig.MAX_CONTEXT_LINES)
+      } else {
+        DefaultConfig.CONTEXT_LINES
       }
 }
 

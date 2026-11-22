@@ -4,7 +4,10 @@ import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiCallResult
 import com.example.data.preferences.SecureKeyStorage
 import com.example.domain.model.AppSettings
+import com.example.domain.model.DefaultConfig
+import com.example.domain.model.InputMode
 import com.example.domain.model.NamingMode
+import com.example.domain.model.ParamMode
 import com.example.domain.model.SrtBlock
 import com.example.srt.BatchReconciliationResult
 import com.example.srt.SrtEngine
@@ -425,5 +428,116 @@ class ExampleUnitTest {
       "Expected FatalError for config 400, got $badThinkingConfig",
       badThinkingConfig is GeminiCallResult.FatalError,
     )
+  }
+
+  @Test
+  fun `context lines default is 50 and SrtEngine buildSurroundingContext caps and includes prior translations`() {
+    assertEquals(50, DefaultConfig.CONTEXT_LINES)
+    assertEquals(50, AppSettings().effectiveContextLines)
+    assertEquals(
+      0,
+      AppSettings(contextLinesMode = ParamMode.MANUAL, manualContextLines = -5).effectiveContextLines,
+    )
+    assertEquals(
+      500,
+      AppSettings(contextLinesMode = ParamMode.MANUAL, manualContextLines = 999).effectiveContextLines,
+    )
+
+    val allBlocks =
+      (1..20).map { idx ->
+        SrtBlock(
+          index = idx,
+          timestamp = "00:00:${idx.toString().padStart(2, '0')},000 --> 00:00:${idx.toString().padStart(2, '0')},900",
+          lines = listOf("Dialogue line $idx"),
+        )
+      }
+
+    // Disabled when 0
+    assertEquals(
+      "",
+      SrtEngine.buildSurroundingContext(allBlocks, startIdx = 5, endIdxExclusive = 10, maxContextLines = 0),
+    )
+
+    // Middle batch [8..12) with maxContextLines = 6 -> 3 before (6,7,8 -> indices 5,6,7 => cues 6..8) + 3 after (cues 13..15)
+    val translatedMap =
+      mapOf(
+        8 to SrtBlock(8, "00:00:08,000 --> 00:00:08,900", listOf("সংলাপ ৮"))
+      )
+    val midContext =
+      SrtEngine.buildSurroundingContext(
+        allBlocks = allBlocks,
+        startIdx = 8,
+        endIdxExclusive = 12,
+        maxContextLines = 6,
+        translatedByIndex = translatedMap,
+      )
+    assertTrue(midContext.contains("PRECEDING LINES"))
+    assertTrue(midContext.contains("FOLLOWING LINES"))
+    assertTrue(midContext.contains("[#6] \"Dialogue line 6\""))
+    assertTrue(midContext.contains("[#8] \"Dialogue line 8\" (BN: \"সংলাপ ৮\")"))
+    assertFalse(midContext.contains("Dialogue line 5\""))
+    assertTrue(midContext.contains("[#13] \"Dialogue line 13\""))
+    assertTrue(midContext.contains("[#15] \"Dialogue line 15\""))
+    assertFalse(midContext.contains("Dialogue line 16\""))
+    assertFalse(midContext.contains("-->"))
+
+    // Start of file [0..5) -> all 6 context lines go to following cues (6..11)
+    val startContext =
+      SrtEngine.buildSurroundingContext(
+        allBlocks = allBlocks,
+        startIdx = 0,
+        endIdxExclusive = 5,
+        maxContextLines = 6,
+      )
+    assertFalse(startContext.contains("PRECEDING LINES"))
+    assertTrue(startContext.contains("[#6] \"Dialogue line 6\""))
+    assertTrue(startContext.contains("[#11] \"Dialogue line 11\""))
+  }
+
+  @Test
+  fun `gemini client attaches surrounding context before final target batch turn without altering batch payload`() {
+    val client = GeminiApiClient()
+
+    val noContextReq =
+      client.buildRequestBody(
+        systemPrompt = "Translate",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.MOVIE,
+        title = "Demo",
+        secondaryMeta = "2026",
+        batchSrtPayload = "2\n00:00:02,000 --> 00:00:03,000\nTarget line",
+        batchIndex = 1,
+        totalBatches = 1,
+        fileName = "demo.srt",
+        temperature = 0.3f,
+        thinkingBudget = 0,
+        surroundingContext = "",
+      )
+    assertEquals(1, noContextReq.contents.size)
+
+    val withContextReq =
+      client.buildRequestBody(
+        systemPrompt = "Translate",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.MOVIE,
+        title = "Demo",
+        secondaryMeta = "2026",
+        batchSrtPayload = "2\n00:00:02,000 --> 00:00:03,000\nTarget line",
+        batchIndex = 1,
+        totalBatches = 2,
+        fileName = "demo.srt",
+        temperature = 0.3f,
+        thinkingBudget = 0,
+        surroundingContext = "PRECEDING LINES:\n[#1] \"Who is there?\"",
+      )
+    assertEquals(3, withContextReq.contents.size)
+    assertEquals("user", withContextReq.contents[0].role)
+    assertTrue(withContextReq.contents[0].parts.first().text.orEmpty().contains("SURROUNDING DIALOGUE CONTEXT"))
+    assertTrue(withContextReq.contents[0].parts.first().text.orEmpty().contains("Who is there?"))
+    assertEquals("model", withContextReq.contents[1].role)
+    assertEquals("user", withContextReq.contents.last().role)
+    val targetTurnText = withContextReq.contents.last().parts.first().text.orEmpty()
+    assertTrue(targetTurnText.contains("Target line"))
+    assertFalse(targetTurnText.contains("Who is there?"))
   }
 }

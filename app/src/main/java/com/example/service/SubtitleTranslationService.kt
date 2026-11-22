@@ -10,6 +10,7 @@ import com.example.data.network.RotationExecutionResult
 import com.example.data.preferences.SettingsRepository
 import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.AppSettings
+import com.example.domain.model.DefaultConfig
 import com.example.domain.model.InputMode
 import com.example.domain.model.LogLevel
 import com.example.domain.model.SelectedSubtitleFile
@@ -27,6 +28,9 @@ data class SubtitleSegment(
   val totalSegments: Int,
   val blocks: List<SrtBlock>,
   val formattedSrtPayload: String,
+  val startBlockIndex: Int = 0,
+  val endBlockIndexExclusive: Int = blocks.size,
+  val surroundingContext: String = "",
 )
 
 data class SegmentedSubtitlePlan(
@@ -83,50 +87,58 @@ class SubtitleTranslationService(
     rawSrtContent: String,
     chunkSize: Int,
     fileName: String = "subtitle.srt",
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
   ): SegmentedSubtitlePlan {
     val blocks = SrtParser.parseBlocks(rawSrtContent)
     return segmentBlocks(
       blocks = blocks,
       chunkSize = chunkSize,
       fileName = fileName,
+      contextLines = contextLines,
     )
   }
 
   fun parseAndSegment(
     file: SelectedSubtitleFile,
     chunkSize: Int,
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
   ): SegmentedSubtitlePlan {
     return segmentBlocks(
       blocks = file.blocks,
       chunkSize = chunkSize,
       fileName = file.fileName,
+      contextLines = contextLines,
     )
   }
 
   fun parseAndSegment(
     file: File,
     chunkSize: Int,
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
   ): SegmentedSubtitlePlan {
     val rawContent = if (file.exists() && file.isFile) SrtParser.readRaw(file) else ""
     return parseAndSegment(
       rawSrtContent = rawContent,
       chunkSize = chunkSize,
       fileName = file.name.ifBlank { "subtitle.srt" },
+      contextLines = contextLines,
     )
   }
 
   suspend fun parseAndSegmentUri(
     uri: Uri,
     chunkSize: Int,
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
   ): SegmentedSubtitlePlan? {
     val analyzed = fileStorage.readAndAnalyzeUri(uri) ?: return null
-    return parseAndSegment(analyzed, chunkSize)
+    return parseAndSegment(analyzed, chunkSize, contextLines)
   }
 
   fun segmentBlocks(
     blocks: List<SrtBlock>,
     chunkSize: Int,
     fileName: String = "subtitle.srt",
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
   ): SegmentedSubtitlePlan {
     if (blocks.isEmpty()) {
       return SegmentedSubtitlePlan(
@@ -137,17 +149,34 @@ class SubtitleTranslationService(
     }
 
     val safeChunkSize = chunkSize.coerceAtLeast(1)
-    val chunked = blocks.chunked(safeChunkSize)
-    val totalSegments = chunked.size
-    val segments =
-      chunked.mapIndexed { idx, segmentBlocks ->
+    val totalSegments = (blocks.size + safeChunkSize - 1) / safeChunkSize
+    val segments = ArrayList<SubtitleSegment>(totalSegments)
+    var start = 0
+    var segIdx = 1
+    while (start < blocks.size) {
+      val end = (start + safeChunkSize).coerceAtMost(blocks.size)
+      val segmentBlocks = blocks.subList(start, end)
+      val surroundingContext =
+        SrtEngine.buildSurroundingContext(
+          allBlocks = blocks,
+          startIdx = start,
+          endIdxExclusive = end,
+          maxContextLines = contextLines,
+        )
+      segments.add(
         SubtitleSegment(
-          segmentIndex = idx + 1,
+          segmentIndex = segIdx,
           totalSegments = totalSegments,
           blocks = segmentBlocks,
           formattedSrtPayload = SrtParser.formatBlocks(segmentBlocks),
+          startBlockIndex = start,
+          endBlockIndexExclusive = end,
+          surroundingContext = surroundingContext,
         )
-      }
+      )
+      start = end
+      segIdx++
+    }
 
     return SegmentedSubtitlePlan(
       fileName = fileName,
@@ -177,6 +206,7 @@ class SubtitleTranslationService(
         fileName = fileName,
         temperature = settings.effectiveTemperature,
         thinkingBudget = settings.effectiveThinkingBudget,
+        surroundingContext = segment.surroundingContext,
       )
     return PreparedSegmentRequest(
       fileName = fileName,
@@ -195,6 +225,8 @@ class SubtitleTranslationService(
     secondaryMeta: String,
     fileName: String,
     workId: String? = null,
+    allBlocks: List<SrtBlock> = emptyList(),
+    translatedByIndex: Map<Int, SrtBlock> = emptyMap(),
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
     onRetryDelay: suspend (seconds: Int, prefix: String) -> Unit = { seconds, _ ->
@@ -210,6 +242,10 @@ class SubtitleTranslationService(
     return translateBlockSliceWithRotation(
       session = session,
       blocks = segment.blocks,
+      sliceStartIndex = segment.startBlockIndex,
+      allBlocks = allBlocks,
+      translatedByIndex = translatedByIndex,
+      fallbackContext = segment.surroundingContext,
       batchIndex = segment.segmentIndex,
       totalBatches = segment.totalSegments,
       settings = settings,
@@ -229,6 +265,10 @@ class SubtitleTranslationService(
   private suspend fun translateBlockSliceWithRotation(
     session: KeyRotationSession,
     blocks: List<SrtBlock>,
+    sliceStartIndex: Int,
+    allBlocks: List<SrtBlock>,
+    translatedByIndex: Map<Int, SrtBlock>,
+    fallbackContext: String,
     batchIndex: Int,
     totalBatches: Int,
     settings: AppSettings,
@@ -244,6 +284,21 @@ class SubtitleTranslationService(
     onCooldownWait: suspend (cooldownMinutes: Int) -> Unit,
   ): RotationExecutionResult<List<SrtBlock>> {
     val payload = SrtParser.formatBlocks(blocks)
+    val contextLinesLimit = settings.effectiveContextLines
+    val sliceContext =
+      when {
+        contextLinesLimit <= 0 -> ""
+        allBlocks.isNotEmpty() ->
+          SrtEngine.buildSurroundingContext(
+            allBlocks = allBlocks,
+            startIdx = sliceStartIndex,
+            endIdxExclusive = sliceStartIndex + blocks.size,
+            maxContextLines = contextLinesLimit,
+            translatedByIndex = translatedByIndex,
+          )
+        splitDepth == 0 -> fallbackContext
+        else -> ""
+      }
     val outcome =
       keyRotationManager.executeBatchWithRotation(
         session = session,
@@ -263,6 +318,7 @@ class SubtitleTranslationService(
         retryIntervalSeconds = settings.effectiveRetryIntervalSeconds,
         cooldownMinutes = settings.effectiveCooldownMinutes,
         workId = workId,
+        surroundingContext = sliceContext,
         validateOutput = { rawText ->
           val parsedOutput = SrtEngine.parseModelOutput(rawText)
           when (val reconciled = SrtEngine.reconcileBatch(blocks, parsedOutput)) {
@@ -296,6 +352,10 @@ class SubtitleTranslationService(
         translateBlockSliceWithRotation(
           session = session,
           blocks = firstHalf,
+          sliceStartIndex = sliceStartIndex,
+          allBlocks = allBlocks,
+          translatedByIndex = translatedByIndex,
+          fallbackContext = "",
           batchIndex = batchIndex,
           totalBatches = totalBatches,
           settings = settings,
@@ -314,10 +374,23 @@ class SubtitleTranslationService(
         return firstResult
       }
 
+      val updatedTranslated =
+        if (translatedByIndex.isEmpty() && firstResult.value.isEmpty()) {
+          translatedByIndex
+        } else {
+          HashMap(translatedByIndex).apply {
+            firstResult.value.forEach { put(it.index, it) }
+          }
+        }
+
       val secondResult =
         translateBlockSliceWithRotation(
           session = session,
           blocks = secondHalf,
+          sliceStartIndex = sliceStartIndex + mid,
+          allBlocks = allBlocks,
+          translatedByIndex = updatedTranslated,
+          fallbackContext = "",
           batchIndex = batchIndex,
           totalBatches = totalBatches,
           settings = settings,
@@ -373,6 +446,7 @@ class SubtitleTranslationService(
         rawSrtContent = rawSrtContent,
         chunkSize = effectiveChunkSize,
         fileName = fileName,
+        contextLines = settings.effectiveContextLines,
       )
     if (plan.isEmpty) {
       return SubtitleTranslationServiceResult.Failure(
@@ -388,6 +462,7 @@ class SubtitleTranslationService(
     }
 
     val accumulated = ArrayList<SrtBlock>(plan.totalBlocks)
+    val translatedContextMap = HashMap<Int, SrtBlock>(plan.totalBlocks)
     for (segment in plan.segments) {
       currentCoroutineContext().ensureActive()
       val outcome =
@@ -400,6 +475,8 @@ class SubtitleTranslationService(
           secondaryMeta = secondaryMeta,
           fileName = plan.fileName,
           workId = workId,
+          allBlocks = plan.parsedBlocks,
+          translatedByIndex = translatedContextMap,
           onStatusLog = onStatusLog,
           onRetryDelay = onRetryDelay,
           onCooldownWait = onCooldownWait,
@@ -408,6 +485,7 @@ class SubtitleTranslationService(
       when (outcome) {
         is RotationExecutionResult.Success -> {
           accumulated.addAll(outcome.value)
+          outcome.value.forEach { translatedContextMap[it.index] = it }
           onSegmentCompleted(segment, outcome.value)
         }
         is RotationExecutionResult.Failure -> {

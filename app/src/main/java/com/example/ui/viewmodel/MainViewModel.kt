@@ -505,6 +505,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch { settingsRepo.setCooldownMinutes(mode, minutes) }
   }
 
+  fun setContextLines(mode: ParamMode, manualValue: Int) {
+    viewModelScope.launch { settingsRepo.setContextLines(mode, manualValue) }
+  }
+
   // --- History & Export ---
 
   fun updateHistorySearchQuery(query: String) {

@@ -69,6 +69,7 @@ import com.example.domain.model.ParamMode
 import com.example.domain.model.PromptMode
 import com.example.domain.model.ThemeMode
 import com.example.srt.SrtEngine
+import com.example.ui.components.ContextAwareTranslationCard
 import com.example.ui.components.ParamModeHeader
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StudioSectionCard
@@ -229,13 +230,19 @@ fun SettingsScreen(
       }
     }
 
-    // 4. Output File Naming Convention
+    // 4. Context-Aware Translation
+    ContextAwareTranslationCard(
+      settings = settings,
+      onSetContextLines = viewModel::setContextLines,
+    )
+
+    // 5. Output File Naming Convention
     NamingConventionCard(
       settings = settings,
       onSaveNaming = viewModel::setNamingConfig,
     )
 
-    // 5. Advanced Settings (Default vs Manual for every parameter + Default Prompt Editor)
+    // 6. Advanced Settings (Default vs Manual for every parameter + Default Prompt Editor)
     AdvancedSettingsCard(
       settings = settings,
       viewModel = viewModel,

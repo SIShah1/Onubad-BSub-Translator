@@ -219,6 +219,115 @@ object SrtEngine {
 
   fun formatBlocks(blocks: List<SrtBlock>): String = SrtParser.formatBlocks(blocks)
 
+  /**
+   * Builds compact surrounding dialogue context (preceding & following lines) around a batch slice
+   * `[startIdx, endIdxExclusive)` without SRT timestamps, strictly capped at [maxContextLines] lines.
+   */
+  fun buildSurroundingContext(
+    allBlocks: List<SrtBlock>,
+    startIdx: Int,
+    endIdxExclusive: Int,
+    maxContextLines: Int,
+    translatedByIndex: Map<Int, SrtBlock> = emptyMap(),
+  ): String {
+    if (maxContextLines <= 0 || allBlocks.isEmpty()) return ""
+    val safeStart = startIdx.coerceIn(0, allBlocks.size)
+    val safeEnd = endIdxExclusive.coerceIn(safeStart, allBlocks.size)
+    if (safeStart >= safeEnd) return ""
+
+    fun cleanLinesOf(block: SrtBlock): List<String> =
+      block.lines.map { it.trim() }.filter { it.isNotBlank() }
+
+    var availBeforeLines = 0
+    for (i in (safeStart - 1) downTo 0) {
+      val count = cleanLinesOf(allBlocks[i]).size.coerceAtLeast(1)
+      availBeforeLines += count
+      if (availBeforeLines >= maxContextLines) break
+    }
+    var availAfterLines = 0
+    for (i in safeEnd until allBlocks.size) {
+      val count = cleanLinesOf(allBlocks[i]).size.coerceAtLeast(1)
+      availAfterLines += count
+      if (availAfterLines >= maxContextLines) break
+    }
+
+    if (availBeforeLines == 0 && availAfterLines == 0) return ""
+
+    val half = maxContextLines / 2
+    val targetBefore: Int
+    val targetAfter: Int
+    if (availBeforeLines < half) {
+      targetBefore = availBeforeLines
+      targetAfter = minOf(availAfterLines, maxContextLines - targetBefore)
+    } else if (availAfterLines < (maxContextLines - half)) {
+      targetAfter = availAfterLines
+      targetBefore = minOf(availBeforeLines, maxContextLines - targetAfter)
+    } else {
+      targetBefore = half
+      targetAfter = maxContextLines - half
+    }
+
+    val precedingEntries = ArrayList<String>()
+    var beforeUsed = 0
+    if (targetBefore > 0) {
+      for (i in (safeStart - 1) downTo 0) {
+        val remaining = targetBefore - beforeUsed
+        if (remaining <= 0) break
+        val block = allBlocks[i]
+        val lines = cleanLinesOf(block)
+        if (lines.isEmpty()) continue
+        val slice = if (lines.size <= remaining) lines else lines.takeLast(remaining)
+        val dialogue = slice.joinToString(" / ")
+        val translated =
+          translatedByIndex[block.index]
+            ?.lines
+            ?.map { it.trim() }
+            ?.filter { it.isNotBlank() }
+            ?.joinToString(" / ")
+            ?.takeIf { it.isNotBlank() }
+        val formatted =
+          if (translated != null) {
+            "[#${block.index}] \"$dialogue\" (BN: \"$translated\")"
+          } else {
+            "[#${block.index}] \"$dialogue\""
+          }
+        precedingEntries.add(formatted)
+        beforeUsed += slice.size
+      }
+      precedingEntries.reverse()
+    }
+
+    val followingEntries = ArrayList<String>()
+    var afterUsed = 0
+    if (targetAfter > 0) {
+      for (i in safeEnd until allBlocks.size) {
+        val remaining = targetAfter - afterUsed
+        if (remaining <= 0) break
+        val block = allBlocks[i]
+        val lines = cleanLinesOf(block)
+        if (lines.isEmpty()) continue
+        val slice = if (lines.size <= remaining) lines else lines.take(remaining)
+        val dialogue = slice.joinToString(" / ")
+        followingEntries.add("[#${block.index}] \"$dialogue\"")
+        afterUsed += slice.size
+      }
+    }
+
+    if (precedingEntries.isEmpty() && followingEntries.isEmpty()) return ""
+
+    return buildString {
+      if (precedingEntries.isNotEmpty()) {
+        appendLine("PRECEDING LINES (already occurred before this batch):")
+        precedingEntries.forEach { appendLine(it) }
+      }
+      if (followingEntries.isNotEmpty()) {
+        if (isNotEmpty()) appendLine()
+        appendLine("FOLLOWING LINES (occur after this batch):")
+        followingEntries.forEach { appendLine(it) }
+      }
+    }.trim()
+  }
+
   fun buildOutputFileName(originalFileName: String, settings: AppSettings): String {
     val cleanName = originalFileName.trim().ifBlank { "subtitle.srt" }
     val baseName =

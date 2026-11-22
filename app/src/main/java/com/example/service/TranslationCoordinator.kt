@@ -273,7 +273,7 @@ class TranslationCoordinator(
       )
 
     appendLog(
-      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.effectiveModel})",
+      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.effectiveModel}, context: ${settings.effectiveContextLines} lines)",
       LogLevel.INFO,
     )
 
@@ -284,6 +284,7 @@ class TranslationCoordinator(
         subtitleTranslationService.parseAndSegment(
           file = file,
           chunkSize = settings.effectiveChunkSize,
+          contextLines = settings.effectiveContextLines,
         )
       val segments = segmentedPlan.segments
       val totalBatches = segments.size.coerceAtLeast(1)
@@ -352,6 +353,15 @@ class TranslationCoordinator(
       }
 
       val savedTranslatedByIndex = subtitleTranslationRepository.getTranslatedBlocksMapForJob(fileJobId)
+      val contextTranslatedByIndex = HashMap<Int, SrtBlock>(segmentedPlan.totalBlocks)
+      savedTranslatedByIndex.forEach { (idx, savedRow) ->
+        contextTranslatedByIndex[idx] =
+          SrtBlock(
+            index = idx,
+            timestamp = savedRow.timestamp,
+            lines = savedRow.lines,
+          )
+      }
       val translatedFileBlocks = ArrayList<SrtBlock>(segmentedPlan.totalBlocks)
 
       try {
@@ -378,6 +388,7 @@ class TranslationCoordinator(
 
           if (resumedBlocks != null && resumedBlocks.size == segment.blocks.size) {
             translatedFileBlocks.addAll(resumedBlocks)
+            resumedBlocks.forEach { contextTranslatedByIndex[it.index] = it }
             completedBlocksAllFiles += resumedBlocks.size
             historyRepository.updateBatchProgress(
               historyId = historyId,
@@ -412,6 +423,8 @@ class TranslationCoordinator(
               secondaryMeta = request.secondaryMeta,
               fileName = file.fileName,
               workId = workId,
+              allBlocks = segmentedPlan.parsedBlocks,
+              translatedByIndex = contextTranslatedByIndex,
               onAttemptStarted = { keyNum, keyLabel, attempt, maxAttempts ->
                 _sessionState.update {
                   it.copy(
@@ -461,6 +474,7 @@ class TranslationCoordinator(
               }
             }
           translatedFileBlocks.addAll(validatedBlocks)
+          validatedBlocks.forEach { contextTranslatedByIndex[it.index] = it }
           subtitleTranslationRepository.markBatchTranslated(
             jobId = fileJobId,
             translatedBlocks = validatedBlocks,

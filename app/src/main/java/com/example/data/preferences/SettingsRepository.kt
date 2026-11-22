@@ -50,6 +50,8 @@ class SettingsRepository(private val context: Context) {
     val MANUAL_MAX_ATTEMPTS = intPreferencesKey("manual_max_attempts")
     val COOLDOWN_MODE = stringPreferencesKey("cooldown_mode")
     val MANUAL_COOLDOWN_MINUTES = intPreferencesKey("manual_cooldown_minutes")
+    val CONTEXT_LINES_MODE = stringPreferencesKey("context_lines_mode")
+    val MANUAL_CONTEXT_LINES = intPreferencesKey("manual_context_lines")
   }
 
   val settingsFlow: Flow<AppSettings> =
@@ -83,6 +85,9 @@ class SettingsRepository(private val context: Context) {
         cooldownMode = enumOrDefault(prefs[Keys.COOLDOWN_MODE], ParamMode.DEFAULT),
         manualCooldownMinutes =
           prefs[Keys.MANUAL_COOLDOWN_MINUTES] ?: DefaultConfig.COOLDOWN_MINUTES,
+        contextLinesMode = enumOrDefault(prefs[Keys.CONTEXT_LINES_MODE], ParamMode.DEFAULT),
+        manualContextLines =
+          prefs[Keys.MANUAL_CONTEXT_LINES] ?: DefaultConfig.CONTEXT_LINES,
       )
     }
 
@@ -178,6 +183,14 @@ class SettingsRepository(private val context: Context) {
     context.settingsDataStore.edit {
       it[Keys.COOLDOWN_MODE] = mode.name
       it[Keys.MANUAL_COOLDOWN_MINUTES] = minutes.coerceIn(1, 180)
+    }
+  }
+
+  suspend fun setContextLines(mode: ParamMode, manualValue: Int) {
+    context.settingsDataStore.edit {
+      it[Keys.CONTEXT_LINES_MODE] = mode.name
+      it[Keys.MANUAL_CONTEXT_LINES] =
+        manualValue.coerceIn(DefaultConfig.MIN_CONTEXT_LINES, DefaultConfig.MAX_CONTEXT_LINES)
     }
   }
 

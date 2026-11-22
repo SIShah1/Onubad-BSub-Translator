@@ -79,6 +79,7 @@ class GeminiApiClient(
     batchIndex: Int,
     totalBatches: Int,
     fileName: String,
+    surroundingContext: String = "",
   ): GeminiCallResult =
     withContext(Dispatchers.IO) {
       val cleanModel = model.trim().removePrefix("models/")
@@ -95,6 +96,7 @@ class GeminiApiClient(
           fileName = fileName,
           temperature = temperature,
           thinkingBudget = thinkingBudget,
+          surroundingContext = surroundingContext,
         )
 
       try {
@@ -144,6 +146,7 @@ class GeminiApiClient(
     batchIndex: Int,
     totalBatches: Int,
     fileName: String,
+    surroundingContext: String = "",
   ): GeminiCallResult =
     withContext(Dispatchers.IO) {
       val cleanModel = model.trim().removePrefix("models/")
@@ -160,6 +163,7 @@ class GeminiApiClient(
           fileName = fileName,
           temperature = temperature,
           thinkingBudget = thinkingBudget,
+          surroundingContext = surroundingContext,
         )
       executeGeminiCall {
         apiService.generateContentWithKeyRotation(
@@ -213,6 +217,7 @@ class GeminiApiClient(
     fileName: String,
     temperature: Float,
     thinkingBudget: Int,
+    surroundingContext: String = "",
   ): GeminiGenerateContentRequest {
     val contextHeader =
       buildString {
@@ -256,6 +261,36 @@ class GeminiApiClient(
           )
         )
       }
+
+    // Add surrounding dialogue context (reference only) before the target batch turn
+    val cleanSurroundingContext = surroundingContext.trim()
+    if (cleanSurroundingContext.isNotEmpty()) {
+      val contextTurnText =
+        """
+SURROUNDING DIALOGUE CONTEXT (REFERENCE ONLY — DO NOT TRANSLATE OR OUTPUT THESE LINES):
+Use these surrounding lines strictly to preserve dialogue coherence, pronoun formality (আপনি / তুমি / তুই), and consistent character voices.
+
+$cleanSurroundingContext
+        """.trimIndent()
+      contentsList.add(
+        GeminiContent(
+          role = "user",
+          parts = listOf(GeminiPart(text = contextTurnText)),
+        )
+      )
+      contentsList.add(
+        GeminiContent(
+          role = "model",
+          parts =
+            listOf(
+              GeminiPart(
+                text =
+                  "Understood. I will use the surrounding dialogue only for context and character-voice consistency, and I will translate and output ONLY the exact SRT blocks in the next message."
+              )
+            ),
+        )
+      )
+    }
 
     // Final user turn with the actual SRT batch to translate
     val batchInstruction =
