@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="clover_emerald">#FF006D5B</color>
+    <color name="clover_emerald_deep">#FF005244</color>
+    <color name="clover_mint_aqua">#FF56CEBA</color>
+    <color name="clover_yellow">#FFF4D35E</color>
+    <color name="clover_coral">#FFF28C82</color>
+    <color name="studio_midnight">#FF081411</color>
+    <color name="light_canvas">#FFF3F8F6</color>
+    <color name="window_background">@color/light_canvas</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "BSub Translator",
+  "description": "AI-powered English-to-Bengali SRT subtitle translator with automated batch validation, multi-key Gemini API rotation, and background foreground service.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

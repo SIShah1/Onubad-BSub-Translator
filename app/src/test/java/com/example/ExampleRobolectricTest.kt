@@ -1,0 +1,2373 @@
+package com.example
+
+import android.content.Context
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import androidx.work.ListenableWorker
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
+import androidx.work.testing.TestListenableWorkerBuilder
+import androidx.work.testing.WorkManagerTestInitHelper
+import androidx.work.workDataOf
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
+import com.example.data.preferences.SecureKeyStorage
+import com.example.data.storage.SubtitleFileStorage
+import com.example.srt.SrtFileParser
+import com.example.domain.model.TranslationStatus
+import com.example.data.local.BSubDatabase
+import com.example.data.local.FileTranslationProgress
+import com.example.data.local.HistoryRepository
+import com.example.data.local.HistoryTranslationStatus
+import com.example.data.local.RoomTranslationProgress
+import com.example.data.local.SubtitleHistory
+import com.example.data.local.SubtitleHistoryRepository
+import com.example.data.local.SubtitleTranslation
+import com.example.data.local.SubtitleTranslationRepository
+import com.example.data.local.SubtitleTranslationStatus
+import com.example.data.local.TranslationHistoryEntity
+import com.example.ui.screens.HistoryScreen
+import com.example.data.network.ApiKeyRotationManager
+import com.example.data.network.GeminiApiClient
+import com.example.data.network.GeminiApiService
+import com.example.data.network.GeminiCallResult
+import com.example.data.network.GeminiCandidate
+import com.example.data.network.GeminiContent
+import com.example.data.network.GeminiGenerateContentRequest
+import com.example.data.network.GeminiGenerateContentResponse
+import com.example.data.network.GeminiKeyRotationInterceptor
+import com.example.data.network.GeminiPart
+import com.example.data.network.RotationExecutionResult
+import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.AppSettings
+import com.example.domain.model.InputMode
+import com.example.domain.model.ParamMode
+import com.example.domain.model.SelectedSubtitleFile
+import com.example.domain.model.SrtBlock
+import com.example.domain.model.ThemeMode
+import com.example.domain.model.TranslationJobRequest
+import com.example.domain.model.TranslationSessionState
+import com.example.logging.ErrorCategory
+import com.example.logging.TranslationLogger
+import com.example.logging.WorkManagerDiagnosticTree
+import com.example.service.SubtitleTranslationService
+import com.example.service.SubtitleTranslationServiceResult
+import com.example.ui.screens.StudioScreen
+import com.example.ui.screens.SubtitlePreviewScreen
+import com.example.ui.screens.fitHeroTitleFontSizeSp
+import com.example.ui.theme.BSubTranslatorTheme
+import com.example.ui.theme.CloverCoralTint
+import com.example.ui.theme.CloverEmerald
+import com.example.ui.theme.CloverMintAqua
+import com.example.ui.theme.CloverYellow
+import com.example.ui.theme.CloverYellowTint
+import com.example.ui.theme.LightCanvas
+import com.example.ui.theme.LocalThemeController
+import com.example.ui.theme.StudioMidnight
+import com.example.ui.theme.ThemeProvider
+import com.example.ui.viewmodel.MainViewModel
+import com.example.ui.viewmodel.StudioFormState
+import com.example.ui.viewmodel.SubtitleCuePair
+import com.example.ui.viewmodel.SubtitlePreviewState
+import com.example.worker.SubtitleTranslationWorker
+import com.example.worker.TranslationWorkScheduler
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
+import okhttp3.Response as OkHttpResponse
+import okhttp3.ResponseBody.Companion.toResponseBody
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
+import retrofit2.Response
+import timber.log.Timber
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [36])
+class ExampleRobolectricTest {
+
+  @get:Rule val composeTestRule = createComposeRule()
+
+  private lateinit var db: BSubDatabase
+  private lateinit var app: BSubApplication
+
+  @Before
+  fun setUp() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    app = context as BSubApplication
+    db = Room.inMemoryDatabaseBuilder(context, BSubDatabase::class.java).allowMainThreadQueries().build()
+    WorkManagerTestInitHelper.initializeTestWorkManager(context)
+  }
+
+  @After
+  fun tearDown() {
+    app.overrideGeminiServiceForTesting(null)
+    TranslationLogger.resetForTesting(app)
+    db.close()
+  }
+
+  @Test
+  fun `read string from context`() {
+    val context = ApplicationProvider.getApplicationContext<Context>()
+    val appName = context.getString(R.string.app_name)
+    assertEquals("BSub Translator", appName)
+  }
+
+  @Test
+  fun `subtitle translation entity persists pending and transitions to translated`() = runBlocking {
+    val repo = SubtitleTranslationRepository(db.subtitleTranslationDao())
+    val block = SrtBlock(index = 1, timestamp = "00:00:01,000 --> 00:00:03,000", lines = listOf("Hello!"))
+
+    repo.seedPendingBlocks(jobId = "job_1", fileName = "movie.srt", blocks = listOf(block))
+
+    val initialRows: List<SubtitleTranslation> = repo.observeJobTranslations("job_1").first()
+    assertEquals(1, initialRows.size)
+    assertEquals("Hello!", initialRows[0].originalEnglishText)
+    assertEquals(null, initialRows[0].translatedBengaliText)
+    assertEquals(SubtitleTranslationStatus.PENDING, initialRows[0].status)
+
+    val translatedBlock = block.copy(lines = listOf("হ্যালো!"))
+    repo.markBatchTranslated(jobId = "job_1", translatedBlocks = listOf(translatedBlock))
+
+    val updatedRows = repo.observeJobTranslations("job_1").first()
+    assertEquals(1, updatedRows.size)
+    assertEquals("হ্যালো!", updatedRows[0].translatedBengaliText)
+    assertEquals(SubtitleTranslationStatus.TRANSLATED, updatedRows[0].status)
+  }
+
+  @Test
+  fun `subtitle translation repository inserts queries by status and updates by id`() = runBlocking {
+    val repo = SubtitleTranslationRepository(db.subtitleTranslationDao())
+    val id =
+      repo.insertTranslation(
+        jobId = "job_2",
+        fileName = "episode1.srt",
+        blockIndex = 1,
+        timestamp = "00:00:05,000 --> 00:00:07,000",
+        originalEnglishText = "Where are we going?",
+      )
+
+    val pending = repo.observeByStatus(SubtitleTranslationStatus.PENDING).first()
+    assertEquals(1, pending.size)
+    assertEquals(id, pending[0].id)
+
+    repo.markAsTranslated(id, "আমরা কোথায় যাচ্ছি?")
+
+    val translated = repo.observeByStatus(SubtitleTranslationStatus.TRANSLATED).first()
+    assertEquals(1, translated.size)
+    assertEquals("আমরা কোথায় যাচ্ছি?", translated[0].translatedBengaliText)
+  }
+
+  @Test
+  fun `workmanager subtitle translation worker parses srt seeds room and translates batch`() = runBlocking {
+    app.historyRepository.clearAll()
+    app.subtitleTranslationRepository.clearAll()
+    app.secureKeyStorage.clearAllKeys()
+    app.secureKeyStorage.addSingleKey("AIzaSyDummyTestKeyForWorkManager12345", "Test Key #1")
+
+    val fakeGemini =
+      object : GeminiApiService {
+        override suspend fun generateContentWithKeyRotation(
+          model: String,
+          request: GeminiGenerateContentRequest,
+          autoRotate: String,
+        ): Response<GeminiGenerateContentResponse> =
+          generateContent(model = model, apiKey = "", request = request)
+
+        override suspend fun generateContent(
+          model: String,
+          apiKey: String,
+          request: GeminiGenerateContentRequest,
+        ): Response<GeminiGenerateContentResponse> {
+          val translatedSrt =
+            """
+            1
+            00:00:01,000 --> 00:00:03,000
+            কেমন আছেন?
+
+            2
+            00:00:04,000 --> 00:00:06,500
+            সবকিছু ঠিক আছে।
+            """.trimIndent()
+          return Response.success(
+            GeminiGenerateContentResponse(
+              candidates =
+                listOf(
+                  GeminiCandidate(
+                    content = GeminiContent(parts = listOf(GeminiPart(text = translatedSrt))),
+                    finishReason = "STOP",
+                  )
+                )
+            )
+          )
+        }
+      }
+
+    app.overrideGeminiServiceForTesting(fakeGemini)
+
+    val sampleSrt =
+      """
+      1
+      00:00:01,000 --> 00:00:03,000
+      How are you?
+
+      2
+      00:00:04,000 --> 00:00:06,500
+      Everything is fine.
+      """.trimIndent()
+
+    val workerJobId = "wm_test_job_1"
+    val worker =
+      TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+        .setInputData(
+          workDataOf(
+            SubtitleTranslationWorker.KEY_SRT_CONTENT to sampleSrt,
+            SubtitleTranslationWorker.KEY_FILE_NAME to "test_movie.srt",
+            SubtitleTranslationWorker.KEY_INPUT_MODE to InputMode.MOVIE.name,
+            SubtitleTranslationWorker.KEY_TITLE to "Test Film",
+            SubtitleTranslationWorker.KEY_SECONDARY_META to "2026",
+            SubtitleTranslationWorker.KEY_ROOM_JOB_ID to workerJobId,
+          )
+        )
+        .build()
+
+    val result = worker.doWork()
+    assertTrue("Expected WorkManager Result.Success, got $result", result is ListenableWorker.Result.Success)
+
+    val rows = app.subtitleTranslationRepository.observeJobTranslations(workerJobId).first()
+    assertEquals(2, rows.size)
+    assertEquals("How are you?", rows[0].originalEnglishText)
+    assertEquals("কেমন আছেন?", rows[0].translatedBengaliText)
+    assertEquals(SubtitleTranslationStatus.TRANSLATED, rows[0].status)
+    assertEquals("সবকিছু ঠিক আছে।", rows[1].translatedBengaliText)
+    assertEquals(SubtitleTranslationStatus.TRANSLATED, rows[1].status)
+
+    val subtitleHistoryRows =
+      app.subtitleHistoryRepository.observeByOriginalFileName("test_movie.srt").first()
+    assertEquals(1, subtitleHistoryRows.size)
+    assertEquals(HistoryTranslationStatus.COMPLETED, subtitleHistoryRows[0].status)
+    assertEquals(2, subtitleHistoryRows[0].translatedBlocks)
+
+    val uiHistoryRows = app.historyRepository.historyItems.first()
+    assertTrue(
+      uiHistoryRows.any {
+        it.originalFileName == "test_movie.srt" &&
+          it.translationStatus == HistoryTranslationStatus.COMPLETED &&
+          it.translatedBlocks == 2
+      }
+    )
+  }
+
+  @Test
+  fun `translation work scheduler enqueues unique work with network constraint`() = runBlocking {
+    val sampleBlocks =
+      listOf(
+        SrtBlock(index = 1, timestamp = "00:00:01,000 --> 00:00:02,000", lines = listOf("Hello"))
+      )
+    val request =
+      TranslationJobRequest(
+        inputMode = InputMode.MOVIE,
+        title = "Inception",
+        secondaryMeta = "2010",
+        files =
+          listOf(
+            SelectedSubtitleFile(
+              uriString = "",
+              fileName = "inception.srt",
+              fileSizeBytes = 64L,
+              totalBlocks = 1,
+              totalLines = 1,
+              blocks = sampleBlocks,
+            )
+          ),
+      )
+
+    val workId = TranslationWorkScheduler.enqueueTranslation(app, request)
+    val info = WorkManager.getInstance(app).getWorkInfoById(workId).get()
+    assertEquals(WorkInfo.State.ENQUEUED, info?.state)
+    assertTrue(info?.tags?.contains(TranslationWorkScheduler.TAG_SUBTITLE_TRANSLATION) == true)
+  }
+
+  @Test
+  fun `room progress queries and studio progress indicator update from translation status counts`() =
+    runBlocking {
+      val repo = SubtitleTranslationRepository(db.subtitleTranslationDao())
+      val blocks =
+        listOf(
+          SrtBlock(index = 1, timestamp = "00:00:01,000 --> 00:00:02,000", lines = listOf("One")),
+          SrtBlock(index = 2, timestamp = "00:00:03,000 --> 00:00:04,000", lines = listOf("Two")),
+        )
+      repo.seedPendingBlocks(jobId = "progress_job", fileName = "sample.srt", blocks = blocks)
+
+      val initial = repo.observeOverallProgress().first()
+      assertEquals(2, initial.totalBlocks)
+      assertEquals(0, initial.translatedBlocks)
+      assertEquals(2, initial.pendingBlocks)
+      assertEquals(0f, initial.progressFraction)
+
+      composeTestRule.setContent {
+        val roomProgress by repo.observeOverallProgress().collectAsState(initial = RoomTranslationProgress())
+        val fileProgress by
+          repo.observeFileProgressList().collectAsState(initial = emptyList<FileTranslationProgress>())
+        BSubTranslatorTheme {
+          StudioScreen(
+            formState = StudioFormState(),
+            settings = AppSettings(),
+            apiKeys = emptyList(),
+            sessionState = TranslationSessionState(),
+            roomProgress = roomProgress,
+            fileProgressList = fileProgress,
+            onInputModeChange = {},
+            onMovieNameChange = {},
+            onReleaseYearChange = {},
+            onSeriesNameChange = {},
+            onSeasonChange = {},
+            onSingleSrtPicked = {},
+            onMultipleSrtPicked = {},
+            onRemoveFile = {},
+            onMoveSeriesFile = { _, _ -> },
+            onClearFiles = {},
+            onStartTranslation = {},
+            onAbortTranslation = {},
+            onClearLogs = {},
+            onNavigateToKeys = {},
+          )
+        }
+      }
+
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithTag("room_progress_counts").assertTextEquals("0/2 blocks processed")
+      composeTestRule.onNodeWithTag("room_progress_percent").assertTextEquals("0%")
+
+      repo.markBatchTranslated(
+        jobId = "progress_job",
+        translatedBlocks = listOf(blocks[0].copy(lines = listOf("এক"))),
+      )
+
+      val halfOverall = repo.observeOverallProgress().first { it.translatedBlocks == 1 }
+      assertEquals(1, halfOverall.pendingBlocks)
+
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        try {
+          composeTestRule.onNodeWithTag("room_progress_counts").assertTextEquals("1/2 blocks processed")
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+      composeTestRule.onNodeWithTag("room_progress_percent").assertTextEquals("50%")
+
+      val halfFileProgress = repo.observeFileProgressList().first()
+      assertEquals(1, halfFileProgress.size)
+      assertEquals(1, halfFileProgress[0].translatedBlocks)
+      assertEquals(1, halfFileProgress[0].pendingBlocks)
+      assertEquals(50, halfFileProgress[0].progressPercent)
+    }
+
+  @Test
+  fun `theme provider dynamically toggles light and dark color schemes across ui segments`() {
+    var observedBgColor = Color.Unspecified
+    var observedPrimaryColor = Color.Unspecified
+    var observedSecondaryColor = Color.Unspecified
+    var observedSecondaryContainer = Color.Unspecified
+    var observedErrorContainer = Color.Unspecified
+    var observedIsDark = true
+
+    composeTestRule.setContent {
+      var mode by remember { mutableStateOf(ThemeMode.DARK) }
+      ThemeProvider(
+        themeMode = mode,
+        onThemeModeChange = { mode = it },
+        animateTransitions = false,
+      ) {
+        val controller = LocalThemeController.current
+        observedBgColor = MaterialTheme.colorScheme.background
+        observedPrimaryColor = MaterialTheme.colorScheme.primary
+        observedSecondaryColor = MaterialTheme.colorScheme.secondary
+        observedSecondaryContainer = MaterialTheme.colorScheme.secondaryContainer
+        observedErrorContainer = MaterialTheme.colorScheme.errorContainer
+        observedIsDark = controller.isDarkTheme
+        Column {
+          Button(
+            onClick = controller.onToggleLightDark,
+            modifier = Modifier.testTag("test_theme_toggle_trigger"),
+          ) {
+            Text(if (controller.isDarkTheme) "Dark" else "Light")
+          }
+          StudioScreen(
+            formState = StudioFormState(),
+            settings = AppSettings(themeMode = mode),
+            apiKeys = emptyList(),
+            sessionState = TranslationSessionState(),
+            onInputModeChange = {},
+            onMovieNameChange = {},
+            onReleaseYearChange = {},
+            onSeriesNameChange = {},
+            onSeasonChange = {},
+            onSingleSrtPicked = {},
+            onMultipleSrtPicked = {},
+            onRemoveFile = {},
+            onMoveSeriesFile = { _, _ -> },
+            onClearFiles = {},
+            onStartTranslation = {},
+            onAbortTranslation = {},
+            onClearLogs = {},
+            onNavigateToKeys = {},
+          )
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    assertTrue(observedIsDark)
+    assertEquals(StudioMidnight, observedBgColor)
+    assertEquals(CloverMintAqua, observedPrimaryColor)
+    assertEquals(CloverYellow, observedSecondaryColor)
+    composeTestRule.onNodeWithTag("hero_theme_toggle_chip").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("test_theme_toggle_trigger").assertTextContains("Dark")
+
+    composeTestRule.onNodeWithTag("test_theme_toggle_trigger").performClick()
+    composeTestRule.waitForIdle()
+
+    assertEquals(false, observedIsDark)
+    assertEquals(LightCanvas, observedBgColor)
+    assertEquals(CloverEmerald, observedPrimaryColor)
+    assertEquals(CloverYellowTint, observedSecondaryContainer)
+    assertEquals(CloverCoralTint, observedErrorContainer)
+    composeTestRule.onNodeWithTag("test_theme_toggle_trigger").assertTextContains("Light")
+  }
+
+  @Test
+  fun `studio hero banner displays redesigned branding without theme toggle and stacks equal sized status containers`() {
+    var keysClicked = false
+    composeTestRule.setContent {
+      BSubTranslatorTheme(themeMode = ThemeMode.LIGHT) {
+        StudioScreen(
+          formState = StudioFormState(),
+          settings = AppSettings(themeMode = ThemeMode.LIGHT),
+          apiKeys = emptyList(),
+          sessionState = TranslationSessionState(),
+          onInputModeChange = {},
+          onMovieNameChange = {},
+          onReleaseYearChange = {},
+          onSeriesNameChange = {},
+          onSeasonChange = {},
+          onSingleSrtPicked = {},
+          onMultipleSrtPicked = {},
+          onRemoveFile = {},
+          onMoveSeriesFile = { _, _ -> },
+          onClearFiles = {},
+          onStartTranslation = {},
+          onAbortTranslation = {},
+          onClearLogs = {},
+          onNavigateToKeys = { keysClicked = true },
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("hero_theme_toggle_chip").assertDoesNotExist()
+    composeTestRule.onNodeWithText("BSub Translator").assertIsDisplayed()
+    composeTestRule.onNodeWithText("English to Bengali Subtitle Studio").assertIsDisplayed()
+
+    val bannerBounds = composeTestRule.onNodeWithTag("hero_banner").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val keysNode = composeTestRule.onNodeWithTag("hero_keys_chip").assertIsDisplayed()
+    val modelNode = composeTestRule.onNodeWithTag("hero_model_chip").assertIsDisplayed()
+    val chunkNode = composeTestRule.onNodeWithTag("hero_chunk_chip").assertIsDisplayed()
+
+    val keysBounds = keysNode.fetchSemanticsNode().boundsInRoot
+    val modelBounds = modelNode.fetchSemanticsNode().boundsInRoot
+    val chunkBounds = chunkNode.fetchSemanticsNode().boundsInRoot
+    val density = composeTestRule.density.density
+
+    assertTrue("Expected compact hero banner <= 112dp", bannerBounds.height <= 112f * density)
+    assertTrue("Expected short status pills <= 26dp, was ${keysBounds.height / density}dp", keysBounds.height <= 26f * density)
+    assertTrue("Expected top pill inside banner", keysBounds.top >= bannerBounds.top)
+    assertTrue("Expected bottom pill inside banner", chunkBounds.bottom <= bannerBounds.bottom)
+    assertEquals(keysBounds.width, modelBounds.width, 1f)
+    assertEquals(modelBounds.width, chunkBounds.width, 1f)
+    assertEquals(keysBounds.height, modelBounds.height, 1f)
+    assertEquals(modelBounds.height, chunkBounds.height, 1f)
+    assertTrue("Expected right-side pills stacked vertically", keysBounds.top < modelBounds.top)
+    assertTrue("Expected model pill above chunk pill", modelBounds.top < chunkBounds.top)
+
+    keysNode.performClick()
+    assertTrue(keysClicked)
+  }
+
+  @Test
+  @Config(sdk = [36], qualifiers = "w440dp-h900dp")
+  fun `studio hero banner scales title font so BSub Translator matches subtitle text width`() {
+    composeTestRule.setContent {
+      BSubTranslatorTheme(themeMode = ThemeMode.LIGHT) {
+        StudioScreen(
+          formState = StudioFormState(),
+          settings = AppSettings(themeMode = ThemeMode.LIGHT),
+          apiKeys = emptyList(),
+          sessionState = TranslationSessionState(),
+          onInputModeChange = {},
+          onMovieNameChange = {},
+          onReleaseYearChange = {},
+          onSeriesNameChange = {},
+          onSeasonChange = {},
+          onSingleSrtPicked = {},
+          onMultipleSrtPicked = {},
+          onRemoveFile = {},
+          onMoveSeriesFile = { _, _ -> },
+          onClearFiles = {},
+          onStartTranslation = {},
+          onAbortTranslation = {},
+          onClearLogs = {},
+          onNavigateToKeys = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    val density = composeTestRule.density.density
+    val bannerBounds = composeTestRule.onNodeWithTag("hero_banner").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val titleBounds = composeTestRule.onNodeWithText("BSub Translator").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val subtitleBounds =
+      composeTestRule.onNodeWithText("English to Bengali Subtitle Studio").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val keysBounds = composeTestRule.onNodeWithTag("hero_keys_chip").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+
+    assertTrue("Expected BSub Translator to sit cleanly inside banner", titleBounds.top >= bannerBounds.top)
+    assertTrue("Expected subtitle to sit cleanly inside banner", subtitleBounds.bottom <= bannerBounds.bottom)
+    assertTrue("Expected title stacked above subtitle", titleBounds.top < subtitleBounds.top)
+    assertTrue("Expected title to stay left of right pill stack", titleBounds.right <= keysBounds.left)
+    assertTrue("Expected subtitle to stay left of right pill stack", subtitleBounds.right <= keysBounds.left)
+    assertTrue("Expected compact hero banner <= 112dp", bannerBounds.height <= 112f * density)
+
+    // Verify proportional width-matching solver matches subtitle width within 1px
+    val targetSubtitleWidthPx = 204f * density
+    val titleChars = "BSub Translator".length
+    val fittedSp =
+      fitHeroTitleFontSizeSp(
+        targetWidthPx = targetSubtitleWidthPx,
+        maxHeightPx = 64f * density,
+      ) { candidateSp ->
+        val w = titleChars * 0.56f * candidateSp * density
+        val h = 1.1f * candidateSp * density
+        w to h
+      }
+    val resultingWidthPx = titleChars * 0.56f * fittedSp * density
+    assertEquals(targetSubtitleWidthPx, resultingWidthPx, 1f * density)
+    assertTrue("Expected scaled title font size >= 23sp, was $fittedSp", fittedSp >= 23f)
+  }
+
+  @Test
+  fun `timber diagnostic tree tracks workmanager api failures redacts keys and persists log file`() =
+    runBlocking {
+      assertTrue(
+        "Expected BSubApplication.onCreate() to plant WorkManagerDiagnosticTree",
+        Timber.forest().any { it is WorkManagerDiagnosticTree },
+      )
+
+      TranslationLogger.clearDiagnosticLogs(app)
+      app.subtitleTranslationRepository.clearAll()
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setMaxAttemptsPerKey(ParamMode.MANUAL, 1)
+      app.settingsRepository.setRetryInterval(ParamMode.MANUAL, 1)
+
+      val keyAlpha = "AIzaSySecretAlphaKeyValue1234567890"
+      val keyBravo = "AIzaSySecretBravoKeyValue1234567890"
+      val keyCharlie = "AIzaSySecretCharlieKeyValue12345678"
+      val keyDelta = "AIzaSySecretDeltaKeyValue1234567890"
+
+      app.secureKeyStorage.addSingleKey(keyAlpha, "Alpha")
+      app.secureKeyStorage.addSingleKey(keyBravo, "Bravo")
+      app.secureKeyStorage.addSingleKey(keyCharlie, "Charlie")
+      app.secureKeyStorage.addSingleKey(keyDelta, "Delta")
+
+      val jsonMedia = "application/json".toMediaType()
+      val fakeGemini =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            return when (apiKey) {
+              keyAlpha ->
+                Response.error(
+                  429,
+                  """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for ?key=$keyAlpha"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              keyBravo ->
+                Response.error(
+                  503,
+                  """{"error":{"status":"UNAVAILABLE","message":"Server busy for $keyBravo"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              keyCharlie ->
+                Response.error(
+                  400,
+                  """{"error":{"status":"INVALID_ARGUMENT","message":"API key not valid: $keyCharlie"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              else ->
+                Response.success(
+                  GeminiGenerateContentResponse(
+                    candidates =
+                      listOf(
+                        GeminiCandidate(
+                          content =
+                            GeminiContent(
+                              parts =
+                                listOf(
+                                  GeminiPart(
+                                    text =
+                                      """
+                                      1
+                                      00:00:01,000 --> 00:00:03,000
+                                      হ্যালো পৃথিবী।
+                                      """.trimIndent()
+                                  )
+                                )
+                            ),
+                          finishReason = "STOP",
+                        )
+                      )
+                  )
+                )
+            }
+          }
+        }
+
+      app.overrideGeminiServiceForTesting(fakeGemini)
+
+      val sampleSrt =
+        """
+        1
+        00:00:01,000 --> 00:00:03,000
+        Hello world.
+        """.trimIndent()
+
+      val worker =
+        TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+          .setInputData(
+            workDataOf(
+              SubtitleTranslationWorker.KEY_SRT_CONTENT to sampleSrt,
+              SubtitleTranslationWorker.KEY_FILE_NAME to "diagnostic_test.srt",
+              SubtitleTranslationWorker.KEY_ROOM_JOB_ID to "timber_test_job",
+            )
+          )
+          .build()
+
+      val result = worker.doWork()
+      assertTrue("Expected worker success after key rotation, got $result", result is ListenableWorker.Result.Success)
+
+      val events = TranslationLogger.errorEvents.value
+      assertTrue(events.any { it.category == ErrorCategory.API_QUOTA_EXHAUSTED && it.httpCode == 429 })
+      assertTrue(events.any { it.category == ErrorCategory.API_RETRYABLE_ERROR && it.httpCode == 503 })
+      assertTrue(events.any { it.category == ErrorCategory.API_INVALID_KEY && it.httpCode == 400 })
+      assertTrue(events.all { it.fileName == "diagnostic_test.srt" && !it.workId.isNullOrBlank() })
+
+      val persistedLog = TranslationLogger.readPersistedErrorLog(app)
+      assertTrue(persistedLog.contains("API_QUOTA_EXHAUSTED"))
+      assertTrue(persistedLog.contains("API_RETRYABLE_ERROR"))
+      assertTrue(persistedLog.contains("API_INVALID_KEY"))
+      assertFalse("Raw API key Alpha leaked into persisted log!", persistedLog.contains(keyAlpha))
+      assertFalse("Raw API key Bravo leaked into persisted log!", persistedLog.contains(keyBravo))
+      assertFalse("Raw API key Charlie leaked into persisted log!", persistedLog.contains(keyCharlie))
+    }
+
+  @Test
+  fun `timber diagnostic tree captures workmanager srt parse and execution failures`() =
+    runBlocking {
+      TranslationLogger.clearDiagnosticLogs(app)
+
+      val worker =
+        TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+          .setInputData(
+            workDataOf(
+              SubtitleTranslationWorker.KEY_SRT_CONTENT to "not a valid subtitle file",
+              SubtitleTranslationWorker.KEY_FILE_NAME to "broken_input.srt",
+            )
+          )
+          .build()
+
+      val result = worker.doWork()
+      assertTrue("Expected Result.Failure for invalid SRT", result is ListenableWorker.Result.Failure)
+
+      val events = TranslationLogger.errorEvents.value
+      assertTrue(
+        "Expected SRT_PARSE_ERROR event, got $events",
+        events.any {
+          it.category == ErrorCategory.SRT_PARSE_ERROR && it.fileName == "broken_input.srt"
+        },
+      )
+      assertTrue(
+        "Expected WORKER_EXECUTION_ERROR event, got $events",
+        events.any { it.category == ErrorCategory.WORKER_EXECUTION_ERROR },
+      )
+    }
+
+  @Test
+  fun `api key rotation manager rotates datastore keys on retrofit rate limit and persists active cursor`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+
+      val key1 = "AIzaSyRateLimitedKeyOne1234567890"
+      val key2 = "AIzaSyInvalidKeyTwo12345678901234"
+      val key3 = "AIzaSyHealthyKeyThree123456789012"
+
+      app.secureKeyStorage.addSingleKey(key1, "Primary")
+      app.secureKeyStorage.addSingleKey(key2, "Backup")
+      app.secureKeyStorage.addSingleKey(key3, "Reserve")
+
+      val attemptedKeys = mutableListOf<String>()
+      val jsonMedia = "application/json".toMediaType()
+      val retrofitService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            attemptedKeys.add(apiKey)
+            return when (apiKey) {
+              key1 ->
+                Response.error(
+                  429,
+                  """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Rate limit exceeded"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              key2 ->
+                Response.error(
+                  401,
+                  """{"error":{"status":"PERMISSION_DENIED","message":"Invalid API key"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              else ->
+                Response.success(
+                  GeminiGenerateContentResponse(
+                    candidates =
+                      listOf(
+                        GeminiCandidate(
+                          content =
+                            GeminiContent(
+                              parts =
+                                listOf(
+                                  GeminiPart(
+                                    text = "1\n00:00:01,000 --> 00:00:02,000\nসব ঠিক আছে।"
+                                  )
+                                )
+                            ),
+                          finishReason = "STOP",
+                        )
+                      )
+                  )
+                )
+            }
+          }
+        }
+
+      val rotationManager =
+        ApiKeyRotationManager(
+          keyStorage = app.secureKeyStorage,
+          geminiApiClient = GeminiApiClient(customService = retrofitService),
+        )
+
+      val result =
+        rotationManager.translateBatchWithAutoRotation(
+          settings = AppSettings(),
+          inputMode = InputMode.MOVIE,
+          title = "Arrival",
+          secondaryMeta = "2016",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nEverything is fine.",
+          onRetryDelay = { _, _ -> },
+        )
+
+      assertTrue("Expected Success after rotating past key1 and key2, got $result", result is RotationExecutionResult.Success)
+      val success = result as RotationExecutionResult.Success
+      assertEquals(3, success.usedKeyNumber)
+      assertEquals("Reserve", success.usedKeyLabel)
+      assertEquals(listOf(key1, key2, key3), attemptedKeys)
+
+      // Verify DataStore persisted updated key statuses and active cursor index = 2 (Reserve)
+      assertEquals(2, app.secureKeyStorage.getActiveKeyIndex())
+      val storedKeys = app.secureKeyStorage.getKeysSnapshot()
+      assertEquals(ApiKeyStatus.QUOTA_EXHAUSTED, storedKeys[0].status)
+      assertEquals(ApiKeyStatus.INVALID, storedKeys[1].status)
+      assertEquals(ApiKeyStatus.ACTIVE, storedKeys[2].status)
+
+      // Subsequent session starts from persisted active cursor (index 2 -> Reserve) without retrying key2 (INVALID)
+      val nextSession = rotationManager.prepareSession()
+      assertEquals(2, nextSession.currentIndex)
+      assertTrue(1 in nextSession.invalidIndices)
+    }
+
+  @Test
+  fun `notification foreground info uses monochrome clover app icon drawable`() = runBlocking {
+    val drawable = ContextCompat.getDrawable(app, R.drawable.ic_notification_app_icon)
+    assertTrue("Expected ic_notification_app_icon drawable to load", drawable != null)
+
+    val worker = TestListenableWorkerBuilder<SubtitleTranslationWorker>(app).build()
+    val foregroundInfo = worker.getForegroundInfo()
+    assertEquals(
+      R.drawable.ic_notification_app_icon,
+      foregroundInfo.notification.smallIcon.resId,
+    )
+    assertEquals(0xFF006D5B.toInt(), foregroundInfo.notification.color)
+  }
+
+  @Test
+  fun `subtitle translation service parses segments prepares gemini requests and rotates keys`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 2)
+      app.settingsRepository.setMaxAttemptsPerKey(ParamMode.MANUAL, 1)
+      app.settingsRepository.setRetryInterval(ParamMode.MANUAL, 1)
+
+      val keyA = "AIzaSyServiceKeyA_1234567890"
+      val keyB = "AIzaSyServiceKeyB_1234567890"
+      app.secureKeyStorage.addSingleKey(keyA, "Primary")
+      app.secureKeyStorage.addSingleKey(keyB, "Backup")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+
+      val rawSrt =
+        """
+        1
+        00:00:01,000 --> 00:00:02,500
+        Good morning.
+
+        2
+        00:00:03,000 --> 00:00:04,500
+        How is everything?
+
+        3
+        00:00:05,000 --> 00:00:06,500
+        All is ready.
+        """.trimIndent()
+
+      val seenRequests = mutableListOf<Pair<String, String>>()
+      val mockGeminiService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            val promptText = request.contents.last().parts.first().text.orEmpty()
+            seenRequests.add(apiKey to promptText)
+
+            if (apiKey == keyA) {
+              return Response.error(
+                429,
+                """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Rate limit hit"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+
+            val responseSrt =
+              if (promptText.contains("Good morning.")) {
+                """
+                1
+                00:00:01,000 --> 00:00:02,500
+                শুভ সকাল।
+
+                2
+                00:00:03,000 --> 00:00:04,500
+                সবকিছু কেমন চলছে?
+                """.trimIndent()
+              } else {
+                """
+                3
+                00:00:05,000 --> 00:00:06,500
+                সবকিছু প্রস্তুত।
+                """.trimIndent()
+              }
+
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = responseSrt))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockGeminiService)
+      val rotationManager =
+        ApiKeyRotationManager(
+          keyStorage = app.secureKeyStorage,
+          geminiApiClient = apiClient,
+        )
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val settingsSnapshot = app.settingsRepository.getSettingsSnapshot()
+      val plan = service.parseAndSegment(rawSrt, chunkSize = 2, fileName = "demo.srt")
+      assertEquals(3, plan.totalBlocks)
+      assertEquals(2, plan.segments.size)
+      assertEquals(2, plan.segments[0].blocks.size)
+      assertEquals(1, plan.segments[1].blocks.size)
+
+      val prepared =
+        service.prepareTranslationRequest(
+          segment = plan.segments[0],
+          settings = settingsSnapshot,
+          inputMode = InputMode.MOVIE,
+          title = "Demo Movie",
+          secondaryMeta = "2026",
+          fileName = "demo.srt",
+        )
+      assertTrue(
+        prepared.requestBody.contents.last().parts.first().text.orEmpty().contains("Good morning.")
+      )
+
+      val serviceResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "demo.srt",
+          inputMode = InputMode.MOVIE,
+          title = "Demo Movie",
+          secondaryMeta = "2026",
+          chunkSizeOverride = 2,
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { minutes ->
+            throw AssertionError("Unexpected cooldown ($minutes min). Seen requests: $seenRequests")
+          },
+        )
+
+      assertTrue(serviceResult is SubtitleTranslationServiceResult.Success)
+      val success = serviceResult as SubtitleTranslationServiceResult.Success
+      assertEquals(2, success.segmentsProcessed)
+      assertEquals(3, success.translatedBlocks.size)
+      assertTrue(success.reconstructedBengaliSrt.contains("00:00:01,000 --> 00:00:02,500\nশুভ সকাল।"))
+      assertTrue(success.reconstructedBengaliSrt.contains("00:00:05,000 --> 00:00:06,500\nসবকিছু প্রস্তুত।"))
+      assertEquals(keyA, seenRequests[0].first)
+      assertEquals(keyB, seenRequests[1].first)
+      assertEquals(keyB, seenRequests[2].first)
+    }
+
+  @Test
+  fun `room history repository tracks processing completed failed records with filenames and timestamps`() =
+    runBlocking {
+      val repo = HistoryRepository(db.translationHistoryDao())
+
+      val processingId =
+        repo.createProcessingRecord(
+          originalFileName = "Inception.2010.English.srt",
+          expectedOutputFileName = "Inception.2010.English_BSub.srt",
+          mode = InputMode.MOVIE.name,
+          titleMetadata = "Inception (2010)",
+          totalBlocks = 1200,
+          totalLines = 3100,
+          modelUsed = "gemini-2.5-flash",
+          nowEpochMs = 1_700_000_000_000L,
+        )
+
+      val initial = repo.getById(processingId)!!
+      assertEquals("Inception.2010.English.srt", initial.originalFileName)
+      assertEquals(HistoryTranslationStatus.PROCESSING, initial.translationStatus)
+      assertEquals(1_700_000_000_000L, initial.createdAtEpochMs)
+      assertEquals(1_700_000_000_000L, initial.updatedAtEpochMs)
+
+      repo.updateBatchProgress(
+        historyId = processingId,
+        translatedBlocks = 300,
+        updatedAtEpochMs = 1_700_000_030_000L,
+      )
+      assertEquals(300, repo.getById(processingId)!!.translatedBlocks)
+
+      repo.markCompleted(
+        historyId = processingId,
+        outputFileName = "Inception.2010.English_BSub.srt",
+        savedPath = "Downloads/BSub Translator/Inception.2010.English_BSub.srt",
+        contentUri = "content://downloads/1",
+        localBackupPath = "/tmp/inception_bsub.srt",
+        translatedBlocks = 1200,
+        fileSizeBytes = 42_000L,
+        updatedAtEpochMs = 1_700_000_060_000L,
+      )
+
+      val failedId =
+        repo.createProcessingRecord(
+          originalFileName = "Andor_S02E01.srt",
+          expectedOutputFileName = "Andor_S02E01_BSub.srt",
+          mode = InputMode.SERIES.name,
+          titleMetadata = "Andor • S02",
+          totalBlocks = 500,
+          totalLines = 1200,
+          modelUsed = "gemini-2.5-flash",
+          nowEpochMs = 1_700_000_100_000L,
+        )
+      repo.markFailed(
+        historyId = failedId,
+        translatedBlocks = 0,
+        errorMessage = "Quota exhausted on all keys",
+        updatedAtEpochMs = 1_700_000_120_000L,
+      )
+
+      assertEquals(2, repo.totalCount.first())
+      assertEquals(1, repo.observeCountByStatus(HistoryTranslationStatus.COMPLETED).first())
+      assertEquals(1, repo.observeCountByStatus(HistoryTranslationStatus.FAILED).first())
+
+      val completedList = repo.observeByStatus(HistoryTranslationStatus.COMPLETED).first()
+      assertEquals(1, completedList.size)
+      assertEquals("Inception.2010.English.srt", completedList[0].originalFileName)
+      assertEquals(1_700_000_060_000L, completedList[0].updatedAtEpochMs)
+
+      val searchMatches = repo.searchHistory("Andor").first()
+      assertEquals(1, searchMatches.size)
+      assertEquals(HistoryTranslationStatus.FAILED, searchMatches[0].translationStatus)
+      assertEquals("Quota exhausted on all keys", searchMatches[0].errorMessage)
+
+      repo.deleteRecord(failedId)
+      assertEquals(1, repo.totalCount.first())
+    }
+
+  @Test
+  fun `bsub database migration 2 to 3 preserves existing history and populates status and timestamp`() =
+    runBlocking {
+      val dbName = "migration_2_3_test.db"
+      app.deleteDatabase(dbName)
+      val sqlite = app.openOrCreateDatabase(dbName, Context.MODE_PRIVATE, null)
+      sqlite.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS `translation_history` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+          `originalFileName` TEXT NOT NULL,
+          `outputFileName` TEXT NOT NULL,
+          `savedPath` TEXT NOT NULL,
+          `contentUri` TEXT NOT NULL,
+          `localBackupPath` TEXT NOT NULL,
+          `mode` TEXT NOT NULL,
+          `titleMetadata` TEXT NOT NULL,
+          `totalBlocks` INTEGER NOT NULL,
+          `translatedBlocks` INTEGER NOT NULL,
+          `totalLines` INTEGER NOT NULL,
+          `fileSizeBytes` INTEGER NOT NULL,
+          `modelUsed` TEXT NOT NULL,
+          `status` TEXT NOT NULL,
+          `createdAtEpochMs` INTEGER NOT NULL
+        )
+        """.trimIndent()
+      )
+      sqlite.execSQL(
+        """
+        CREATE TABLE IF NOT EXISTS `subtitle_translations` (
+          `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+          `jobId` TEXT NOT NULL,
+          `fileName` TEXT NOT NULL,
+          `blockIndex` INTEGER NOT NULL,
+          `timestamp` TEXT NOT NULL,
+          `originalEnglishText` TEXT NOT NULL,
+          `translatedBengaliText` TEXT,
+          `status` TEXT NOT NULL,
+          `updatedAtEpochMs` INTEGER NOT NULL
+        )
+        """.trimIndent()
+      )
+      sqlite.execSQL(
+        "CREATE INDEX IF NOT EXISTS `index_subtitle_translations_jobId_blockIndex` ON `subtitle_translations` (`jobId`, `blockIndex`)"
+      )
+      sqlite.execSQL(
+        """
+        INSERT INTO `translation_history` VALUES
+        (1, 'movie.srt', 'movie_BSub.srt', 'Downloads/movie_BSub.srt', '', '/tmp/a.srt', 'MOVIE', 'Movie', 100, 100, 250, 4096, 'gemini-2.5-flash', 'Completed', 1700000000000),
+        (2, 'ep1.srt', 'ep1_partial.srt', 'Downloads/ep1_partial.srt', '', '/tmp/b.srt', 'SERIES', 'Series', 200, 80, 500, 2048, 'gemini-2.5-flash', 'Partial (80/200)', 1700000050000)
+        """.trimIndent()
+      )
+      sqlite.version = 2
+      sqlite.close()
+
+      val migratedDb =
+        Room.databaseBuilder(app, BSubDatabase::class.java, dbName)
+          .addMigrations(
+            BSubDatabase.MIGRATION_1_2,
+            BSubDatabase.MIGRATION_2_3,
+            BSubDatabase.MIGRATION_3_4,
+          )
+          .allowMainThreadQueries()
+          .build()
+
+      try {
+        val items = migratedDb.translationHistoryDao().getAllHistory().first()
+        assertEquals(2, items.size)
+        val partial = items.first { it.id == 2L }
+        val completed = items.first { it.id == 1L }
+        assertEquals(HistoryTranslationStatus.PARTIAL, partial.translationStatus)
+        assertEquals(1_700_000_050_000L, partial.updatedAtEpochMs)
+        assertEquals(HistoryTranslationStatus.COMPLETED, completed.translationStatus)
+        assertEquals(1_700_000_000_000L, completed.updatedAtEpochMs)
+
+        val subtitleHistoryItems = migratedDb.subtitleHistoryDao().getAllHistory().first()
+        assertEquals(2, subtitleHistoryItems.size)
+        assertTrue(subtitleHistoryItems.any { it.originalFileName == "movie.srt" && it.status == HistoryTranslationStatus.COMPLETED })
+        assertTrue(subtitleHistoryItems.any { it.originalFileName == "ep1.srt" && it.status == HistoryTranslationStatus.PARTIAL })
+      } finally {
+        migratedDb.close()
+        app.deleteDatabase(dbName)
+      }
+    }
+
+  @Test
+  fun `history screen displays original filenames timestamps and filters by status`() {
+    val sampleItems =
+      listOf(
+        TranslationHistoryEntity(
+          id = 1L,
+          originalFileName = "Dune.Part.One.srt",
+          outputFileName = "Dune.Part.One_BSub.srt",
+          savedPath = "Downloads/BSub Translator/Dune.Part.One_BSub.srt",
+          localBackupPath = "/tmp/dune.srt",
+          mode = "MOVIE",
+          titleMetadata = "Dune (2021)",
+          totalBlocks = 100,
+          translatedBlocks = 100,
+          totalLines = 220,
+          fileSizeBytes = 5000L,
+          modelUsed = "gemini-2.5-flash",
+          status = "Completed",
+          translationStatus = HistoryTranslationStatus.COMPLETED,
+          createdAtEpochMs = 1_700_000_000_000L,
+          updatedAtEpochMs = 1_700_000_050_000L,
+        ),
+        TranslationHistoryEntity(
+          id = 2L,
+          originalFileName = "Broken_File.srt",
+          outputFileName = "",
+          mode = "MOVIE",
+          titleMetadata = "Broken Movie",
+          totalBlocks = 50,
+          translatedBlocks = 0,
+          totalLines = 100,
+          fileSizeBytes = 0L,
+          modelUsed = "gemini-2.5-flash",
+          status = "Failed",
+          translationStatus = HistoryTranslationStatus.FAILED,
+          errorMessage = "Network timeout",
+          createdAtEpochMs = 1_700_000_100_000L,
+          updatedAtEpochMs = 1_700_000_110_000L,
+        ),
+      )
+
+    composeTestRule.setContent {
+      BSubTranslatorTheme {
+        HistoryScreen(
+          historyItems = sampleItems,
+          previewState = null,
+          onOpenPreview = {},
+          onClosePreview = {},
+          onReSaveToDownloads = {},
+          onExportToUri = { _, _ -> },
+          onCreateShareIntent = { null },
+          onDeleteItem = {},
+        )
+      }
+    }
+
+    composeTestRule.onNodeWithText("Source: Dune.Part.One.srt").assertIsDisplayed()
+
+    composeTestRule.onNodeWithTag("history_filter_failed").performClick()
+    composeTestRule.onNodeWithText("Source: Broken_File.srt").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Network timeout").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Source: Dune.Part.One.srt").assertDoesNotExist()
+
+    composeTestRule.onNodeWithTag("history_filter_completed").performClick()
+    composeTestRule.onNodeWithText("Source: Dune.Part.One.srt").assertIsDisplayed()
+    composeTestRule.onNodeWithText("Source: Broken_File.srt").assertDoesNotExist()
+  }
+
+  @Test
+  fun `history screen empty state renders custom empty archive illustration and headline`() {
+    val emptyDrawable = ContextCompat.getDrawable(app, R.drawable.img_history_empty_state)
+    assertTrue("Expected img_history_empty_state drawable to exist", emptyDrawable != null)
+
+    composeTestRule.setContent {
+      BSubTranslatorTheme {
+        HistoryScreen(
+          historyItems = emptyList(),
+          onOpenPreview = {},
+          onReSaveToDownloads = {},
+          onExportToUri = { _, _ -> },
+          onCreateShareIntent = { null },
+          onDeleteItem = {},
+        )
+      }
+    }
+
+    composeTestRule.onNodeWithTag("history_empty_image").assertIsDisplayed()
+    composeTestRule.onNodeWithText("No Translated Files Yet").assertIsDisplayed()
+  }
+
+  @Test
+  fun `gemini key rotation interceptor rotates through keys on 429 and 401 via retrofit`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      val key1 = "AIzaSyInterceptorKeyOne_12345"
+      val key2 = "AIzaSyInterceptorKeyTwo_12345"
+      val key3 = "AIzaSyInterceptorKeyThree_123"
+      app.secureKeyStorage.addSingleKey(key1, "QuotaKey")
+      app.secureKeyStorage.addSingleKey(key2, "InvalidKey")
+      app.secureKeyStorage.addSingleKey(key3, "HealthyKey")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+
+      val attemptedKeys = mutableListOf<String>()
+      val sawInternalHeader = mutableListOf<Boolean>()
+      val mockTransportInterceptor = Interceptor { chain ->
+        val req = chain.request()
+        val keyParam = req.url.queryParameter("key").orEmpty()
+        attemptedKeys.add(keyParam)
+        sawInternalHeader.add(req.header(GeminiKeyRotationInterceptor.HEADER_AUTO_ROTATE) != null)
+
+        when (keyParam) {
+          key1 ->
+            OkHttpResponse.Builder()
+              .request(req)
+              .protocol(Protocol.HTTP_1_1)
+              .code(429)
+              .message("Too Many Requests")
+              .body(
+                """{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota limit exceeded"}}"""
+                  .toResponseBody("application/json".toMediaType())
+              )
+              .build()
+          key2 ->
+            OkHttpResponse.Builder()
+              .request(req)
+              .protocol(Protocol.HTTP_1_1)
+              .code(401)
+              .message("Unauthorized")
+              .body(
+                """{"error":{"code":401,"status":"API_KEY_INVALID","message":"API key not valid"}}"""
+                  .toResponseBody("application/json".toMediaType())
+              )
+              .build()
+          key3 ->
+            OkHttpResponse.Builder()
+              .request(req)
+              .protocol(Protocol.HTTP_1_1)
+              .code(200)
+              .message("OK")
+              .body(
+                """{"candidates":[{"content":{"parts":[{"text":"1\n00:00:01,000 --> 00:00:02,000\nহ্যালো বিশ্ব"}]},"finishReason":"STOP"}]}"""
+                  .toResponseBody("application/json".toMediaType())
+              )
+              .build()
+          else -> error("Unexpected API key: $keyParam")
+        }
+      }
+
+      val client =
+        GeminiApiClient(
+          keyStorage = app.secureKeyStorage,
+          extraInterceptors = listOf(mockTransportInterceptor),
+        )
+
+      val result =
+        client.translateBatchWithInterceptorRotation(
+          model = "gemini-2.5-flash",
+          temperature = 0.2f,
+          thinkingBudget = 0,
+          systemPrompt = "Translate to Bengali",
+          fewShotExamples = emptyList(),
+          inputMode = InputMode.MOVIE,
+          title = "Demo",
+          secondaryMeta = "2026",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHello world",
+          batchIndex = 1,
+          totalBatches = 1,
+          fileName = "demo.srt",
+        )
+
+      assertTrue(result is GeminiCallResult.Success)
+      assertTrue((result as GeminiCallResult.Success).translatedText.contains("হ্যালো বিশ্ব"))
+      assertEquals(listOf(key1, key2, key3), attemptedKeys)
+      assertTrue(sawInternalHeader.none { it })
+
+      val keysAfter = app.secureKeyStorage.getKeysSnapshot()
+      assertEquals(ApiKeyStatus.QUOTA_EXHAUSTED, keysAfter[0].status)
+      assertEquals(ApiKeyStatus.INVALID, keysAfter[1].status)
+      assertEquals(ApiKeyStatus.ACTIVE, keysAfter[2].status)
+      assertEquals(2, app.secureKeyStorage.getActiveKeyIndex())
+    }
+
+  @Test
+  fun `subtitle history entity and dao insert update search and query by status`() = runBlocking {
+    val dao = db.subtitleHistoryDao()
+    val repo = SubtitleHistoryRepository(dao)
+
+    val rowId =
+      repo.insert(
+        SubtitleHistory(
+          originalFileName = "Interstellar.2014.srt",
+          outputFileName = "Interstellar.2014_BSub.srt",
+          mode = InputMode.MOVIE.name,
+          titleMetadata = "Interstellar (2014)",
+          totalBlocks = 850,
+          translatedBlocks = 0,
+          totalLines = 1900,
+          modelUsed = "gemini-2.5-flash",
+          status = HistoryTranslationStatus.PROCESSING,
+          processedAtEpochMs = 1_700_000_000_000L,
+        )
+      )
+
+    val inserted = repo.getById(rowId)!!
+    assertEquals("Interstellar.2014.srt", inserted.originalFileName)
+    assertEquals(HistoryTranslationStatus.PROCESSING, inserted.status)
+
+    repo.updateProcessingResult(
+      id = rowId,
+      status = HistoryTranslationStatus.COMPLETED,
+      statusLabel = "Completed",
+      translatedBlocks = 850,
+      outputFileName = "Interstellar.2014_BSub.srt",
+      savedPath = "Downloads/BSub Translator/Interstellar.2014_BSub.srt",
+      fileSizeBytes = 38_400L,
+      updatedAtEpochMs = 1_700_000_050_000L,
+    )
+
+    val completedRows = repo.observeByStatus(HistoryTranslationStatus.COMPLETED).first()
+    assertEquals(1, completedRows.size)
+    assertEquals(850, completedRows[0].translatedBlocks)
+    assertEquals(1_700_000_050_000L, completedRows[0].updatedAtEpochMs)
+
+    val matchedByName = repo.searchByFileName("Interstellar").first()
+    assertEquals(1, matchedByName.size)
+    assertEquals(1, repo.totalCount.first())
+
+    repo.deleteById(rowId)
+    assertEquals(0, repo.totalCount.first())
+  }
+
+  @Test
+  fun `workmanager worker records failed subtitle history in room and single file scheduler enqueues work`() =
+    runBlocking {
+      app.historyRepository.clearAll()
+
+      val badWorker =
+        TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+          .setInputData(
+            workDataOf(
+              SubtitleTranslationWorker.KEY_SRT_CONTENT to "not valid srt content",
+              SubtitleTranslationWorker.KEY_FILE_NAME to "corrupt_file.srt",
+              SubtitleTranslationWorker.KEY_INPUT_MODE to InputMode.MOVIE.name,
+              SubtitleTranslationWorker.KEY_TITLE to "Corrupt Film",
+            )
+          )
+          .build()
+
+      val failureResult = badWorker.doWork()
+      assertTrue(failureResult is ListenableWorker.Result.Failure)
+
+      val failedHistory =
+        app.subtitleHistoryRepository.observeByOriginalFileName("corrupt_file.srt").first()
+      assertEquals(1, failedHistory.size)
+      assertEquals(HistoryTranslationStatus.FAILED, failedHistory[0].status)
+      assertTrue(failedHistory[0].errorMessage?.isNotBlank() == true)
+
+      val workId =
+        TranslationWorkScheduler.enqueueSingleFileTranslation(
+          context = app,
+          rawSrtContent = "1\n00:00:01,000 --> 00:00:02,000\nHello",
+          fileName = "single_job.srt",
+          inputMode = InputMode.MOVIE,
+          title = "Single Job",
+        )
+      val info = WorkManager.getInstance(app).getWorkInfoById(workId).get()
+      assertEquals(WorkInfo.State.ENQUEUED, info?.state)
+      assertTrue(info?.tags?.contains(TranslationWorkScheduler.TAG_SUBTITLE_TRANSLATION) == true)
+    }
+
+  @Test
+  fun `studio screen displays file queue badges workmanager multi-file dashboard and inline bulk key import`() {
+    val file1 =
+      SelectedSubtitleFile(
+        id = "f1",
+        uriString = "content://subtitles/ep01.srt",
+        fileName = "ep01.srt",
+        fileSizeBytes = 1024L,
+        totalBlocks = 10,
+        totalLines = 15,
+        blocks = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:02,000", listOf("Hello"))),
+      )
+    val file2 =
+      SelectedSubtitleFile(
+        id = "f2",
+        uriString = "content://subtitles/ep02.srt",
+        fileName = "ep02.srt",
+        fileSizeBytes = 2048L,
+        totalBlocks = 10,
+        totalLines = 18,
+        blocks = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:02,000", listOf("World"))),
+      )
+    val file3 =
+      SelectedSubtitleFile(
+        id = "f3",
+        uriString = "content://subtitles/ep03.srt",
+        fileName = "ep03.srt",
+        fileSizeBytes = 1536L,
+        totalBlocks = 10,
+        totalLines = 14,
+        blocks = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:02,000", listOf("End"))),
+      )
+
+    var importedBulkPayload = ""
+
+    composeTestRule.setContent {
+      BSubTranslatorTheme {
+        StudioScreen(
+          formState =
+            StudioFormState(
+              inputMode = InputMode.SERIES,
+              seriesName = "Andor",
+              season = "S02",
+              seriesFiles = listOf(file1, file2, file3),
+            ),
+          settings = AppSettings(),
+          apiKeys = emptyList(),
+          sessionState =
+            TranslationSessionState(
+              status = TranslationStatus.RUNNING,
+              totalFiles = 3,
+              completedFiles = 1,
+              currentFileIndex = 2,
+              currentFileName = "ep02.srt",
+              totalBlocksAllFiles = 30,
+              completedBlocksAllFiles = 15,
+            ),
+          roomProgress =
+            RoomTranslationProgress(
+              totalBlocks = 30,
+              translatedBlocks = 15,
+              pendingBlocks = 15,
+              activeFileName = "ep02.srt",
+            ),
+          fileProgressList =
+            listOf(
+              FileTranslationProgress("job_1", "ep01.srt", 10, 10, 0),
+              FileTranslationProgress("job_2", "ep02.srt", 10, 5, 5),
+              FileTranslationProgress("job_3", "ep03.srt", 10, 0, 10),
+            ),
+          onInputModeChange = {},
+          onMovieNameChange = {},
+          onReleaseYearChange = {},
+          onSeriesNameChange = {},
+          onSeasonChange = {},
+          onSingleSrtPicked = {},
+          onMultipleSrtPicked = {},
+          onRemoveFile = {},
+          onMoveSeriesFile = { _, _ -> },
+          onClearFiles = {},
+          onStartTranslation = {},
+          onAbortTranslation = {},
+          onClearLogs = {},
+          onImportBulkKeys = { importedBulkPayload = it },
+          onImportKeysFile = {},
+          onNavigateToKeys = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+
+    // 1. Visual status indicators and badges on file list items
+    composeTestRule.onNodeWithTag("file_status_indicator_0").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("file_status_badge_0").assertTextEquals("Completed")
+    composeTestRule.onNodeWithTag("file_status_indicator_1").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("file_status_badge_1").assertTextEquals("In Progress")
+    composeTestRule.onNodeWithTag("file_status_indicator_2").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("file_status_badge_2").assertTextEquals("Pending")
+
+    // 3. Bulk key import card in StudioScreen
+    composeTestRule.onNodeWithTag("studio_bulk_keys_card").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("studio_import_keys_file_button").performScrollTo().assertIsDisplayed()
+
+    // 4. Multi-file WorkManager progress dashboard
+    composeTestRule.onNodeWithTag("workmanager_file_dashboard").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("dashboard_file_row_0").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("dashboard_file_row_1").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("dashboard_file_row_2").performScrollTo().assertIsDisplayed()
+    assertEquals("", importedBulkPayload)
+  }
+
+  @Test
+  fun `studio screen manual bulk key input and file storage read helpers work for multi-key rotation`() =
+    runBlocking {
+      var capturedBulk = ""
+      composeTestRule.setContent {
+        BSubTranslatorTheme {
+          StudioScreen(
+            formState = StudioFormState(),
+            settings = AppSettings(),
+            apiKeys = emptyList(),
+            sessionState = TranslationSessionState(status = TranslationStatus.IDLE),
+            onInputModeChange = {},
+            onMovieNameChange = {},
+            onReleaseYearChange = {},
+            onSeriesNameChange = {},
+            onSeasonChange = {},
+            onSingleSrtPicked = {},
+            onMultipleSrtPicked = {},
+            onRemoveFile = {},
+            onMoveSeriesFile = { _, _ -> },
+            onClearFiles = {},
+            onStartTranslation = {},
+            onAbortTranslation = {},
+            onClearLogs = {},
+            onImportBulkKeys = { capturedBulk = it },
+            onImportKeysFile = {},
+            onNavigateToKeys = {},
+          )
+        }
+      }
+
+      val keyInput = "GEMINI_1=AIzaSyBulkAlphaKey123456\nAIzaSyBulkBravoKey123456"
+      composeTestRule.onNodeWithTag("studio_bulk_keys_input").performScrollTo().performTextInput(keyInput)
+      composeTestRule.onNodeWithTag("studio_bulk_keys_detected_count").assertTextContains("2 key(s) detected", substring = true)
+      composeTestRule.onNodeWithTag("studio_save_bulk_keys_button").performScrollTo().performClick()
+      assertEquals(keyInput, capturedBulk)
+
+      // 2 & 5. File storage URI read + SrtFileParser class structured parsing from text file
+      val tempSrt = java.io.File(app.cacheDir, "picker_sample.srt")
+      tempSrt.writeText(
+        "\uFEFF1\r\n00:00:01,000 --> 00:00:03,500\r\nFirst line\r\nSecond line\r\n\r\n2\r\n00:00:04,000 --> 00:00:06,000\r\nThird line\r\n",
+        Charsets.UTF_8,
+      )
+      val fileParser = SrtFileParser()
+      val document = fileParser.parseDocument(tempSrt)
+      assertTrue(document.isValid)
+      assertEquals(2, document.totalBlocks)
+      assertEquals(3, document.totalLines)
+      assertEquals("First line\nSecond line", document.items[0].content)
+      assertEquals("00:00:04,000 --> 00:00:06,000", document.blocks[1].timestamp)
+
+      val analyzedFromUri = app.subtitleFileStorage.readAndAnalyzeUri(android.net.Uri.fromFile(tempSrt))
+      assertEquals("picker_sample.srt", analyzedFromUri?.fileName)
+      assertEquals(2, analyzedFromUri?.totalBlocks)
+      assertTrue(SubtitleFileStorage.SRT_PICKER_MIME_TYPES.contains("application/x-subrip"))
+      assertEquals(2, SecureKeyStorage.parseBulkKeys(keyInput).size)
+      assertTrue(tempSrt.delete())
+    }
+
+  @Test
+  fun `tapping processed file in studio or history opens side-by-side english and bengali preview screen`() {
+    val fileDone =
+      SelectedSubtitleFile(
+        id = "done1",
+        uriString = "content://subtitles/dune_ep01.srt",
+        fileName = "dune_ep01.srt",
+        fileSizeBytes = 1024L,
+        totalBlocks = 2,
+        totalLines = 2,
+        blocks =
+          listOf(
+            SrtBlock(1, "00:00:01,000 --> 00:00:03,000", listOf("Dreams are messages from the deep.")),
+            SrtBlock(2, "00:00:04,000 --> 00:00:06,500", listOf("The mystery of life isn't a problem to solve.")),
+          ),
+      )
+    val filePending =
+      SelectedSubtitleFile(
+        id = "pend1",
+        uriString = "content://subtitles/dune_ep02.srt",
+        fileName = "dune_ep02.srt",
+        fileSizeBytes = 512L,
+        totalBlocks = 2,
+        totalLines = 2,
+        blocks = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:02,000", listOf("Pending line"))),
+      )
+
+    var previewedStudioFile: String? = null
+    var openedHistoryItem: TranslationHistoryEntity? = null
+    var closedPreview = false
+
+    val sampleHistory =
+      TranslationHistoryEntity(
+        id = 10L,
+        originalFileName = "dune_ep01.srt",
+        outputFileName = "dune_ep01_BSub.srt",
+        savedPath = "Downloads/BSub Translator/dune_ep01_BSub.srt",
+        localBackupPath = "/tmp/dune_ep01_bsub.srt",
+        mode = "MOVIE",
+        titleMetadata = "Dune (2021)",
+        totalBlocks = 2,
+        translatedBlocks = 2,
+        totalLines = 2,
+        fileSizeBytes = 2048L,
+        modelUsed = "gemini-2.5-flash",
+        status = "Completed",
+        translationStatus = HistoryTranslationStatus.COMPLETED,
+      )
+
+    val previewSampleState =
+      SubtitlePreviewState(
+        fileName = "dune_ep01_BSub.srt",
+        sourceFileName = "dune_ep01.srt",
+        subtitleMeta = "Dune (2021) • MOVIE",
+        hasOriginalText = true,
+        historyItem = sampleHistory,
+        cues =
+          listOf(
+            SubtitleCuePair(
+              index = 1,
+              timestamp = "00:00:01,000 --> 00:00:03,000",
+              englishText = "Dreams are messages from the deep.",
+              bengaliText = "স্বপ্ন হলো গভীরের বার্তা।",
+              isTranslated = true,
+            ),
+            SubtitleCuePair(
+              index = 2,
+              timestamp = "00:00:04,000 --> 00:00:06,500",
+              englishText = "The mystery of life isn't a problem to solve.",
+              bengaliText = "জীবনের রহস্য সমাধানের কোনো সমস্যা নয়।",
+              isTranslated = true,
+            ),
+          ),
+      )
+
+    var activeMode by mutableStateOf("studio")
+
+    composeTestRule.setContent {
+      BSubTranslatorTheme {
+        when (activeMode) {
+          "studio" ->
+            StudioScreen(
+              formState =
+                StudioFormState(
+                  inputMode = InputMode.SERIES,
+                  seriesName = "Dune",
+                  season = "S01",
+                  seriesFiles = listOf(fileDone, filePending),
+                ),
+              settings = AppSettings(),
+              apiKeys = emptyList(),
+              sessionState =
+                TranslationSessionState(
+                  status = TranslationStatus.RUNNING,
+                  totalFiles = 2,
+                  completedFiles = 1,
+                  currentFileIndex = 2,
+                  currentFileName = "dune_ep02.srt",
+                ),
+              fileProgressList =
+                listOf(
+                  FileTranslationProgress("j1", "dune_ep01.srt", 2, 2, 0),
+                  FileTranslationProgress("j2", "dune_ep02.srt", 2, 0, 2),
+                ),
+              onInputModeChange = {},
+              onMovieNameChange = {},
+              onReleaseYearChange = {},
+              onSeriesNameChange = {},
+              onSeasonChange = {},
+              onSingleSrtPicked = {},
+              onMultipleSrtPicked = {},
+              onRemoveFile = {},
+              onMoveSeriesFile = { _, _ -> },
+              onClearFiles = {},
+              onStartTranslation = {},
+              onAbortTranslation = {},
+              onClearLogs = {},
+              onPreviewFile = { name, _ ->
+                previewedStudioFile = name
+                activeMode = "preview"
+              },
+              onNavigateToKeys = {},
+            )
+          "history" ->
+            HistoryScreen(
+              historyItems = listOf(sampleHistory),
+              onOpenPreview = { item ->
+                openedHistoryItem = item
+                activeMode = "preview"
+              },
+              onReSaveToDownloads = {},
+              onExportToUri = { _, _ -> },
+              onCreateShareIntent = { null },
+              onDeleteItem = {},
+            )
+          else ->
+            SubtitlePreviewScreen(
+              state = previewSampleState,
+              onClose = { closedPreview = true },
+            )
+        }
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    // Pending row should not trigger preview on tap
+    composeTestRule.onNodeWithTag("file_queue_item_1").performScrollTo().performClick()
+    assertEquals(null, previewedStudioFile)
+
+    // Processed row triggers preview
+    composeTestRule.onNodeWithTag("file_queue_item_0").performScrollTo().performClick()
+    assertEquals("dune_ep01.srt", previewedStudioFile)
+    composeTestRule.waitForIdle()
+
+    // Verify side-by-side preview headers & cue columns are left (English) vs right (Bengali)
+    composeTestRule.onNodeWithTag("subtitle_preview_screen").assertIsDisplayed()
+    val engHeaderBounds =
+      composeTestRule.onNodeWithTag("preview_header_english").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val benHeaderBounds =
+      composeTestRule.onNodeWithTag("preview_header_bengali").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    assertTrue(
+      "Expected English column left of Bengali column",
+      engHeaderBounds.left < benHeaderBounds.left && engHeaderBounds.right <= benHeaderBounds.left + 4f,
+    )
+
+    val engCue1Bounds =
+      composeTestRule.onNodeWithTag("preview_english_text_1").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val benCue1Bounds =
+      composeTestRule.onNodeWithTag("preview_bengali_text_1").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    assertTrue("Expected cue #1 English text left of Bengali text", engCue1Bounds.left < benCue1Bounds.left)
+    composeTestRule.onNodeWithTag("preview_english_text_1").assertTextContains("Dreams are messages from the deep.", substring = true)
+    composeTestRule.onNodeWithTag("preview_bengali_text_1").assertTextContains("স্বপ্ন হলো গভীরের বার্তা।", substring = true)
+    composeTestRule.onNodeWithTag("preview_cue_row_2").assertIsDisplayed()
+
+    // Search filters cue list
+    composeTestRule.onNodeWithTag("preview_search_input").performTextInput("mystery")
+    composeTestRule.onNodeWithTag("preview_cue_row_2").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("preview_cue_row_1").assertDoesNotExist()
+
+    // Back button closes preview
+    composeTestRule.onNodeWithTag("preview_back_button").performClick()
+    assertTrue(closedPreview)
+
+    // Switch to HistoryScreen and verify tapping processed history card triggers onOpenPreview
+    activeMode = "history"
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("history_item_card_10").performClick()
+    assertEquals(10L, openedHistoryItem?.id)
+  }
+
+  @Test
+  fun `viewmodel pairs archived original english srt and translated bengali srt side-by-side after room cleared`() =
+    runBlocking {
+      app.subtitleTranslationRepository.clearAll()
+      val originalBlocks =
+        listOf(
+          SrtBlock(1, "00:00:01,000 --> 00:00:02,500", listOf("Hello friend")),
+          SrtBlock(2, "00:00:03,000 --> 00:00:05,000", listOf("See you tomorrow")),
+        )
+      val translatedSrt =
+        """
+        1
+        00:00:01,000 --> 00:00:02,500
+        হ্যালো বন্ধু
+
+        2
+        00:00:03,000 --> 00:00:05,000
+        আগামীকাল দেখা হবে
+        """.trimIndent()
+
+      val saved = app.subtitleFileStorage.saveTranslatedSrt("sample_pair_BSub.srt", translatedSrt)
+      app.subtitleFileStorage.saveOriginalSourceBackup(
+        translatedLocalBackupPath = saved.localBackupPath,
+        originalFileName = "sample_pair.srt",
+        blocks = originalBlocks,
+      )
+
+      val historyItem =
+        TranslationHistoryEntity(
+          id = 77L,
+          originalFileName = "sample_pair.srt",
+          outputFileName = saved.outputFileName,
+          savedPath = saved.displayPath,
+          contentUri = saved.contentUri,
+          localBackupPath = saved.localBackupPath,
+          mode = InputMode.MOVIE.name,
+          titleMetadata = "Sample Movie",
+          totalBlocks = 2,
+          translatedBlocks = 2,
+          totalLines = 2,
+          fileSizeBytes = saved.fileSizeBytes,
+          modelUsed = "gemini-2.5-flash",
+          status = HistoryTranslationStatus.COMPLETED.label,
+          translationStatus = HistoryTranslationStatus.COMPLETED,
+        )
+
+      val viewModel = MainViewModel(app)
+      viewModel.openHistoryPreview(historyItem)
+
+      val deadline = System.currentTimeMillis() + 5000L
+      while (System.currentTimeMillis() < deadline) {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        val current = viewModel.previewState.value
+        if (current != null && !current.isLoading && current.cues.isNotEmpty()) break
+        Thread.sleep(25L)
+      }
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+
+      val loaded = viewModel.previewState.value!!
+      assertFalse(loaded.isLoading)
+      assertTrue(loaded.hasOriginalText)
+      assertEquals(2, loaded.cues.size)
+      assertEquals("Hello friend", loaded.cues[0].englishText)
+      assertEquals("হ্যালো বন্ধু", loaded.cues[0].bengaliText)
+      assertEquals("See you tomorrow", loaded.cues[1].englishText)
+      assertEquals("আগামীকাল দেখা হবে", loaded.cues[1].bengaliText)
+
+      viewModel.closeHistoryPreview()
+      assertEquals(null, viewModel.previewState.value)
+      app.subtitleFileStorage.deleteSavedFiles(saved.localBackupPath)
+    }
+
+  @Test
+  @Config(sdk = [36], qualifiers = "w440dp-h900dp")
+  fun `history search bar filters translated srt records by filename and subtitle content`() {
+    val (savedInterstellar, savedAndor) =
+      runBlocking {
+        val s1 =
+          app.subtitleFileStorage.saveTranslatedSrt(
+            "Interstellar_BSub.srt",
+            "1\n00:00:01,000 --> 00:00:03,000\nমহাকাশে ভালোবাসা সময় অতিক্রম করে।\n",
+          )
+        app.subtitleFileStorage.saveOriginalSourceBackup(
+          translatedLocalBackupPath = s1.localBackupPath,
+          originalFileName = "Interstellar.2014.srt",
+          blocks = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:03,000", listOf("Love transcends time and space."))),
+        )
+
+        val s2 =
+          app.subtitleFileStorage.saveTranslatedSrt(
+            "Andor_S01E01_BSub.srt",
+            "1\n00:00:02,000 --> 00:00:04,000\nবিদ্রোহ আজ শুরু হচ্ছে।\n",
+          )
+        app.subtitleFileStorage.saveOriginalSourceBackup(
+          translatedLocalBackupPath = s2.localBackupPath,
+          originalFileName = "Andor.S01E01.srt",
+          blocks = listOf(SrtBlock(1, "00:00:02,000 --> 00:00:04,000", listOf("The rebellion begins today."))),
+        )
+        s1 to s2
+      }
+
+    val item1 =
+      TranslationHistoryEntity(
+        id = 101L,
+        originalFileName = "Interstellar.2014.srt",
+        outputFileName = savedInterstellar.outputFileName,
+        savedPath = savedInterstellar.displayPath,
+        contentUri = savedInterstellar.contentUri,
+        localBackupPath = savedInterstellar.localBackupPath,
+        mode = InputMode.MOVIE.name,
+        titleMetadata = "Interstellar (2014)",
+        totalBlocks = 1,
+        translatedBlocks = 1,
+        totalLines = 1,
+        fileSizeBytes = savedInterstellar.fileSizeBytes,
+        modelUsed = "gemini-2.5-flash",
+        status = HistoryTranslationStatus.COMPLETED.label,
+        translationStatus = HistoryTranslationStatus.COMPLETED,
+      )
+    val item2 =
+      TranslationHistoryEntity(
+        id = 102L,
+        originalFileName = "Andor.S01E01.srt",
+        outputFileName = savedAndor.outputFileName,
+        savedPath = savedAndor.displayPath,
+        contentUri = savedAndor.contentUri,
+        localBackupPath = savedAndor.localBackupPath,
+        mode = InputMode.SERIES.name,
+        titleMetadata = "Andor • S01",
+        totalBlocks = 1,
+        translatedBlocks = 1,
+        totalLines = 1,
+        fileSizeBytes = savedAndor.fileSizeBytes,
+        modelUsed = "gemini-2.5-flash",
+        status = HistoryTranslationStatus.COMPLETED.label,
+        translationStatus = HistoryTranslationStatus.COMPLETED,
+      )
+
+    try {
+      composeTestRule.setContent {
+        BSubTranslatorTheme {
+          HistoryScreen(
+            historyItems = listOf(item1, item2),
+            onOpenPreview = {},
+            onReSaveToDownloads = {},
+            onExportToUri = { _, _ -> },
+            onCreateShareIntent = { null },
+            onDeleteItem = {},
+          )
+        }
+      }
+
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithTag("history_search_input").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertIsDisplayed()
+
+      // 1. Filter by filename
+      composeTestRule.onNodeWithTag("history_search_input").performTextReplacement("Andor")
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertDoesNotExist()
+
+      // Clear search restores both items
+      composeTestRule.onNodeWithTag("history_search_clear").performClick()
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertIsDisplayed()
+
+      runBlocking {
+        assertEquals(
+          "মহাকাশে ভালোবাসা সময় অতিক্রম করে।",
+          app.subtitleFileStorage.findContentMatchSnippet(
+            savedInterstellar.localBackupPath,
+            savedInterstellar.contentUri,
+            "Interstellar.2014.srt",
+            "ভালোবাসা",
+          ),
+        )
+        assertEquals(
+          "The rebellion begins today.",
+          app.subtitleFileStorage.findContentMatchSnippet(
+            savedAndor.localBackupPath,
+            savedAndor.contentUri,
+            "Andor.S01E01.srt",
+            "rebellion",
+          ),
+        )
+      }
+
+      // 2. Filter by translated Bengali subtitle content
+      composeTestRule.onNodeWithTag("history_search_input").performTextReplacement("ভালোবাসা")
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        composeTestRule.mainClock.advanceTimeByFrame()
+        try {
+          composeTestRule
+            .onNodeWithTag("history_content_match_101", useUnmergedTree = true)
+            .assertIsDisplayed()
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+      composeTestRule.onNodeWithText("Match: \"মহাকাশে ভালোবাসা সময় অতিক্রম করে।\"", substring = true).assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertDoesNotExist()
+
+      // 3. Filter by archived original English subtitle content
+      composeTestRule.onNodeWithTag("history_search_clear").performClick()
+      composeTestRule.onNodeWithTag("history_search_input").performTextReplacement("rebellion")
+      composeTestRule.waitUntil(timeoutMillis = 5000L) {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        composeTestRule.mainClock.advanceTimeByFrame()
+        try {
+          composeTestRule
+            .onNodeWithTag("history_content_match_102", useUnmergedTree = true)
+            .assertIsDisplayed()
+          true
+        } catch (_: AssertionError) {
+          false
+        }
+      }
+      composeTestRule.onNodeWithText("Match: \"The rebellion begins today.\"", substring = true).assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertDoesNotExist()
+
+      // 4. Unmatched query shows empty state + reset button
+      composeTestRule.onNodeWithTag("history_search_clear").performClick()
+      composeTestRule.onNodeWithTag("history_search_input").performTextReplacement("nonexistent_phrase_xyz")
+      composeTestRule.onNodeWithText("No Matching Translated Files").assertIsDisplayed()
+      composeTestRule.onNodeWithTag("history_reset_filters_button").performClick()
+      composeTestRule.onNodeWithText("Source: Interstellar.2014.srt").assertIsDisplayed()
+      composeTestRule.onNodeWithText("Source: Andor.S01E01.srt").assertIsDisplayed()
+    } finally {
+      runBlocking {
+        app.subtitleFileStorage.deleteSavedFiles(savedInterstellar.localBackupPath)
+        app.subtitleFileStorage.deleteSavedFiles(savedAndor.localBackupPath)
+      }
+    }
+  }
+
+  @Test
+  fun `key rotation fails fast on daily quota or 404 caps rpm cooldowns and never exhausts on validation`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      val key1 = "AIzaSyFastFailKey1_1234567890"
+      val key2 = "AIzaSyFastFailKey2_1234567890"
+      app.secureKeyStorage.addSingleKey(key1, "One")
+      app.secureKeyStorage.addSingleKey(key2, "Two")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+
+      val jsonMedia = "application/json".toMediaType()
+      var mode = "DAILY"
+      val cooldownMinutesObserved = mutableListOf<Int>()
+
+      val fakeService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            return when (mode) {
+              "DAILY" ->
+                Response.error(
+                  429,
+                  """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for GenerateRequestsPerDay"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              "FATAL_404" ->
+                Response.error(
+                  404,
+                  """{"error":{"status":"NOT_FOUND","message":"Model not found"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              "RPM_429" ->
+                Response.error(
+                  429,
+                  """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Requests per minute rate limit exceeded"}}"""
+                    .toResponseBody(jsonMedia),
+                )
+              else ->
+                Response.success(
+                  GeminiGenerateContentResponse(
+                    candidates =
+                      listOf(
+                        GeminiCandidate(
+                          content =
+                            GeminiContent(parts = listOf(GeminiPart(text = "invalid non-srt text"))),
+                          finishReason = "STOP",
+                        )
+                      )
+                  )
+                )
+            }
+          }
+        }
+
+      val manager =
+        ApiKeyRotationManager(
+          keyStorage = app.secureKeyStorage,
+          geminiApiClient = GeminiApiClient(customService = fakeService),
+        )
+
+      // 1. All keys hitting daily quota must fail immediately with 0 cooldown waits
+      val dailyResult =
+        manager.translateBatchWithAutoRotation(
+          settings = AppSettings(),
+          inputMode = InputMode.MOVIE,
+          title = "Test",
+          secondaryMeta = "2026",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { cooldownMinutesObserved.add(it) },
+        )
+      assertTrue(dailyResult is RotationExecutionResult.Failure)
+      assertTrue(
+        "Expected 0 cooldown waits when all keys hit daily quota, got $cooldownMinutesObserved",
+        cooldownMinutesObserved.isEmpty(),
+      )
+
+      // 2. HTTP 404 must fail immediately without cycling keys or entering cooldown
+      mode = "FATAL_404"
+      val fatalResult =
+        manager.translateBatchWithAutoRotation(
+          settings = AppSettings(),
+          inputMode = InputMode.MOVIE,
+          title = "Test",
+          secondaryMeta = "2026",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { cooldownMinutesObserved.add(it) },
+        )
+      assertTrue(fatalResult is RotationExecutionResult.Failure)
+      assertTrue(cooldownMinutesObserved.isEmpty())
+
+      // 3. Repeated per-minute 429 caps at 2 cooldown cycles with 1-minute max wait (not 30m infinite)
+      mode = "RPM_429"
+      val rpmResult =
+        manager.translateBatchWithAutoRotation(
+          settings = AppSettings(),
+          inputMode = InputMode.MOVIE,
+          title = "Test",
+          secondaryMeta = "2026",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { cooldownMinutesObserved.add(it) },
+        )
+      assertTrue(rpmResult is RotationExecutionResult.Failure)
+      assertEquals(listOf(1, 1), cooldownMinutesObserved)
+
+      // 4. Validation failure flags isValidationFailure = true and never marks healthy keys QUOTA_EXHAUSTED
+      mode = "BAD_OUTPUT"
+      cooldownMinutesObserved.clear()
+      val batchBlock = listOf(SrtBlock(1, "00:00:01,000 --> 00:00:02,000", listOf("Hi")))
+      val validationSession = manager.prepareSession()
+      val valResult =
+        manager.executeBatchWithRotation(
+          session = validationSession,
+          model = "gemini-3.8-flash",
+          temperature = 0.3f,
+          thinkingBudget = 0,
+          systemPrompt = "Translate",
+          fewShotExamples = emptyList(),
+          inputMode = InputMode.MOVIE,
+          title = "Test",
+          secondaryMeta = "2026",
+          batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+          batchIndex = 1,
+          totalBatches = 1,
+          fileName = "test.srt",
+          maxAttemptsPerKey = 3,
+          retryIntervalSeconds = 1,
+          cooldownMinutes = 30,
+          validateOutput = { raw ->
+            val parsed = com.example.srt.SrtEngine.parseModelOutput(raw)
+            when (val r = com.example.srt.SrtEngine.reconcileBatch(batchBlock, parsed)) {
+              is com.example.srt.BatchReconciliationResult.Resolved ->
+                com.example.data.network.BatchValidationOutcome.Valid(r.blocks)
+              is com.example.srt.BatchReconciliationResult.TooIncomplete ->
+                com.example.data.network.BatchValidationOutcome.Invalid(r.reason)
+            }
+          },
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { cooldownMinutesObserved.add(it) },
+        )
+      assertTrue(valResult is RotationExecutionResult.Failure && valResult.isValidationFailure)
+      assertTrue(cooldownMinutesObserved.isEmpty())
+      val storedStatuses = app.secureKeyStorage.getKeysSnapshot().map { it.status }
+      assertTrue(
+        "Expected validation failure not to mark keys QUOTA_EXHAUSTED, got $storedStatuses",
+        storedStatuses.all { it == ApiKeyStatus.ACTIVE },
+      )
+    }
+
+  @Test
+  fun `subtitle translation service auto-splits truncated large batch into halves`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSySplitTestKey_1234567890", "Primary")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 6)
+      app.settingsRepository.setMaxAttemptsPerKey(ParamMode.MANUAL, 1)
+
+      val rawSrt =
+        (1..6).joinToString("\n\n") { idx ->
+          "$idx\n00:00:0$idx,000 --> 00:00:0$idx,800\nCue text $idx"
+        }
+
+      val requestedCueCounts = mutableListOf<Int>()
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            val prompt = request.contents.last().parts.first().text.orEmpty()
+            val blocksInPrompt = com.example.srt.SrtParser.parseBlocks(prompt)
+            requestedCueCounts.add(blocksInPrompt.size)
+
+            // Truncate 6-cue batch (only 2/6 cues) so service must split into 3 + 3
+            val responseText =
+              if (blocksInPrompt.size > 3) {
+                blocksInPrompt.take(2).joinToString("\n\n") { b ->
+                  "${b.index}\n${b.timestamp}\nখণ্ডিত ${b.index}"
+                }
+              } else {
+                blocksInPrompt.joinToString("\n\n") { b ->
+                  "${b.index}\n${b.timestamp}\nঅনুবাদ ${b.index}"
+                }
+              }
+
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = responseText))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockService)
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val result =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "autosplit.srt",
+          chunkSizeOverride = 6,
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { minutes ->
+            throw AssertionError("Unexpected cooldown ($minutes m) during auto-split")
+          },
+        )
+
+      assertTrue("Expected Success after auto-split, got $result", result is SubtitleTranslationServiceResult.Success)
+      val success = result as SubtitleTranslationServiceResult.Success
+      assertEquals(6, success.translatedBlocks.size)
+      assertEquals("অনুবাদ 6", success.translatedBlocks[5].lines.first())
+      assertEquals(listOf(6, 3, 3), requestedCueCounts)
+    }
+
+  @Test
+  fun `worker resumes from saved room translated batches without re-requesting completed segments`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSyResumeKey_1234567890", "Primary")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 10)
+      app.settingsRepository.setMaxAttemptsPerKey(ParamMode.MANUAL, 1)
+
+      val jobId = "resume_job_42"
+      val rawSrt =
+        (1..20).joinToString("\n\n") { idx ->
+          val startSec = idx.toString().padStart(2, '0')
+          val endSec = (idx + 1).toString().padStart(2, '0')
+          "$idx\n00:00:$startSec,000 --> 00:00:$endSec,000\nEnglish line $idx"
+        }
+
+      // Seed Room with Batch 1 (cues 1..10) already translated from an earlier interrupted run
+      app.subtitleTranslationRepository.clearAll()
+      val originalBlocks = com.example.srt.SrtParser.parseBlocks(rawSrt)
+      app.subtitleTranslationRepository.seedPendingBlocks(jobId, "resume_test.srt", originalBlocks)
+      app.subtitleTranslationRepository.markBatchTranslated(
+        jobId = jobId,
+        translatedBlocks =
+          originalBlocks.take(10).map { b ->
+            b.copy(lines = listOf("বাংলা লাইন ${b.index}"))
+          },
+      )
+
+      val promptsSentToApi = mutableListOf<String>()
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            val prompt = request.contents.last().parts.first().text.orEmpty()
+            promptsSentToApi.add(prompt)
+            val parsedPromptBlocks = com.example.srt.SrtParser.parseBlocks(prompt)
+            val reply =
+              parsedPromptBlocks.joinToString("\n\n") { b ->
+                "${b.index}\n${b.timestamp}\nবাংলা লাইন ${b.index}"
+              }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = reply))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+      app.overrideGeminiServiceForTesting(mockService)
+
+      val worker =
+        TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+          .setInputData(
+            workDataOf(
+              SubtitleTranslationWorker.KEY_SRT_CONTENT to rawSrt,
+              SubtitleTranslationWorker.KEY_FILE_NAME to "resume_test.srt",
+              SubtitleTranslationWorker.KEY_ROOM_JOB_ID to jobId,
+            )
+          )
+          .build()
+
+      val result = worker.doWork()
+      assertTrue("Expected resumed worker success, got $result", result is ListenableWorker.Result.Success)
+      // Only Batch 2 (cues 11..20) should hit the API; Batch 1 (1..10) was skipped via Room cache
+      assertEquals(1, promptsSentToApi.size)
+      assertFalse(promptsSentToApi[0].contains("English line 1\n"))
+      assertTrue(promptsSentToApi[0].contains("English line 11"))
+      assertTrue(promptsSentToApi[0].contains("English line 20"))
+      assertEquals(20, result.outputData.getInt(SubtitleTranslationWorker.KEY_COMPLETED_BLOCKS, 0))
+    }
+}
