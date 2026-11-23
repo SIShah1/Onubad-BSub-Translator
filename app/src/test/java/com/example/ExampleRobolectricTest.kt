@@ -36,6 +36,9 @@ import com.example.data.preferences.SecureKeyStorage
 import com.example.data.storage.SubtitleFileStorage
 import com.example.srt.SrtFileParser
 import com.example.domain.model.TranslationStatus
+import com.example.data.local.ApiKeyUsageStat
+import com.example.data.local.ApiRequestOutcome
+import com.example.data.local.ApiUsageEvent
 import com.example.data.local.BSubDatabase
 import com.example.data.local.FileTranslationProgress
 import com.example.data.local.HistoryRepository
@@ -48,6 +51,7 @@ import com.example.data.local.SubtitleTranslationRepository
 import com.example.data.local.SubtitleTranslationStatus
 import com.example.data.local.TranslationHistoryEntity
 import com.example.ui.screens.HistoryScreen
+import com.example.ui.screens.UsageDashboardScreen
 import com.example.data.network.ApiKeyRotationManager
 import com.example.data.network.ChatChoiceDto
 import com.example.data.network.ChatCompletionRequest
@@ -78,6 +82,7 @@ import com.example.domain.model.TranslationSessionState
 import com.example.logging.ErrorCategory
 import com.example.logging.TranslationLogger
 import com.example.logging.WorkManagerDiagnosticTree
+import com.example.service.DynamicBatchSizer
 import com.example.service.SubtitleTranslationService
 import com.example.service.SubtitleTranslationServiceResult
 import com.example.ui.components.ContextAwareTranslationCard
@@ -1160,6 +1165,7 @@ class ExampleRobolectricTest {
             BSubDatabase.MIGRATION_1_2,
             BSubDatabase.MIGRATION_2_3,
             BSubDatabase.MIGRATION_3_4,
+            BSubDatabase.MIGRATION_4_5,
           )
           .allowMainThreadQueries()
           .build()
@@ -1178,6 +1184,21 @@ class ExampleRobolectricTest {
         assertEquals(2, subtitleHistoryItems.size)
         assertTrue(subtitleHistoryItems.any { it.originalFileName == "movie.srt" && it.status == HistoryTranslationStatus.COMPLETED })
         assertTrue(subtitleHistoryItems.any { it.originalFileName == "ep1.srt" && it.status == HistoryTranslationStatus.PARTIAL })
+
+        // Verify v5 API usage tables are created and writable after migration
+        migratedDb.apiUsageDao().upsertKeyStat(
+          ApiKeyUsageStat(
+            keyId = "migrated-key-1",
+            keyLabel = "Key 1",
+            provider = ApiProvider.GEMINI.name,
+            successfulRequests = 3,
+            rateLimitHits = 1,
+          )
+        )
+        val stats = migratedDb.apiUsageDao().observeAllKeyStats().first()
+        assertEquals(1, stats.size)
+        assertEquals(3, stats.first().successfulRequests)
+        assertEquals(1, stats.first().rateLimitHits)
       } finally {
         migratedDb.close()
         app.deleteDatabase(dbName)
@@ -2735,6 +2756,199 @@ class ExampleRobolectricTest {
       assertEquals(
         listOf(DefaultConfig.DEEPSEEK_MODEL, DefaultConfig.DEEPSEEK_MODEL),
         capturedModels,
+      )
+    }
+
+  @Test
+  fun `usage dashboard displays recorded gemini rate limits success counts and clears stats`() =
+    runBlocking {
+      val app = ApplicationProvider.getApplicationContext<BSubApplication>()
+      app.apiUsageRepository.clearStats()
+
+      app.apiUsageRepository.recordRequestOutcome(
+        keyId = "gem-key-1",
+        keyLabel = "Key 1",
+        provider = ApiProvider.GEMINI,
+        model = DefaultConfig.GEMINI_MODEL,
+        batchSize = 100,
+        dynamicBatchSizeAfter = 125,
+        latencyMs = 1_450L,
+        outcome = ApiRequestOutcome.SUCCESS,
+        httpCode = 200,
+        blocksTranslated = 100,
+      )
+      app.apiUsageRepository.recordRequestOutcome(
+        keyId = "gem-key-1",
+        keyLabel = "Key 1",
+        provider = ApiProvider.GEMINI,
+        model = DefaultConfig.GEMINI_MODEL,
+        batchSize = 125,
+        dynamicBatchSizeAfter = 100,
+        latencyMs = 920L,
+        outcome = ApiRequestOutcome.RATE_LIMITED,
+        httpCode = 429,
+        blocksTranslated = 0,
+        errorReason = "HTTP 429 Too Many Requests",
+      )
+      app.apiUsageRepository.recordRequestOutcome(
+        keyId = "gem-key-2",
+        keyLabel = "Key 2",
+        provider = ApiProvider.GEMINI,
+        model = DefaultConfig.GEMINI_MODEL,
+        batchSize = 100,
+        dynamicBatchSizeAfter = 100,
+        latencyMs = 2_100L,
+        outcome = ApiRequestOutcome.SUCCESS,
+        httpCode = 200,
+        blocksTranslated = 100,
+      )
+
+      var clearedProvider: ApiProvider? = ApiProvider.DEEPSEEK
+      var clearedCalled = false
+      val stats = app.apiUsageRepository.allKeyStats.first()
+      val events = app.apiUsageRepository.recentEvents.first()
+
+      composeTestRule.setContent {
+        BSubTranslatorTheme {
+          UsageDashboardScreen(
+            keyStats = stats,
+            recentEvents = events,
+            configuredKeys = emptyList(),
+            settings = AppSettings(dynamicBatchSizingEnabled = true),
+            sessionState = TranslationSessionState(),
+            onClearUsageStats = { provider ->
+              clearedCalled = true
+              clearedProvider = provider
+            },
+          )
+        }
+      }
+
+      composeTestRule.onNodeWithTag("usage_total_success").assertTextContains("2")
+      composeTestRule.onNodeWithTag("usage_total_rate_limits").assertTextContains("1")
+      composeTestRule.onNodeWithTag("usage_bottleneck_banner").assertTextContains("Rate-limit bottleneck on Key 1", substring = true)
+      composeTestRule.onNodeWithTag("usage_key_comparison_chart").assertIsDisplayed()
+      composeTestRule.onNodeWithTag("usage_latency_chart").performScrollTo().assertIsDisplayed()
+      composeTestRule.onNodeWithTag("usage_key_stat_row_0").performScrollTo().assertTextContains("Key 1", substring = true)
+
+      composeTestRule.onNodeWithTag("clear_usage_stats_button").performScrollTo().performClick()
+      composeTestRule.waitForIdle()
+      composeTestRule.onNodeWithTag("confirm_clear_usage_stats_button").performClick()
+      assertTrue(clearedCalled)
+      assertEquals(ApiProvider.GEMINI, clearedProvider)
+    }
+
+  @Test
+  fun `dynamic batch sizing expands slices on fast responses and logs room api usage telemetry`() =
+    runBlocking {
+      val app = ApplicationProvider.getApplicationContext<BSubApplication>()
+      app.secureKeyStorage.clearAllKeys()
+      app.apiUsageRepository.clearStats()
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+
+      app.secureKeyStorage.addSingleKey("AIzaSyDynamicTestKeyAlpha123456", "Key 1", ApiProvider.GEMINI)
+      app.secureKeyStorage.addSingleKey("AIzaSyDynamicTestKeyBeta1234567", "Key 2", ApiProvider.GEMINI)
+
+      val observedSliceSizes = mutableListOf<Int>()
+      val fakeGemini =
+        object : GeminiApiService {
+          var callNumber = 0
+
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            callNumber += 1
+            val batchPrompt = request.contents.lastOrNull()?.parts?.firstOrNull()?.text.orEmpty()
+            val blocks = com.example.srt.SrtParser.parseBlocks(batchPrompt)
+            observedSliceSizes.add(blocks.size)
+
+            // First attempt on Key 1 hits HTTP 429 rate limit; rotated Key 2 succeeds fast
+            if (callNumber == 1) {
+              return Response.error(
+                429,
+                """{"error":{"message":"Rate limit exceeded"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+
+            val reply =
+              blocks.joinToString("\n\n") { b ->
+                "${b.index}\n${b.timestamp}\nঅনুবাদ ${b.index}"
+              }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = reply))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = fakeGemini)
+      val rotationManager =
+        ApiKeyRotationManager(
+          keyStorage = app.secureKeyStorage,
+          geminiApiClient = apiClient,
+          apiUsageRepository = app.apiUsageRepository,
+        )
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val rawSrt =
+        (1..9).joinToString("\n\n") { idx ->
+          "$idx\n00:00:0$idx,000 --> 00:00:0$idx,800\nEnglish line $idx"
+        }
+
+      val dynamicSizer =
+        DynamicBatchSizer(
+          baseBatchSize = 2,
+          enabled = true,
+          minBatchSize = 2,
+          maxBatchSize = 5,
+          windowSize = 3,
+          fastThresholdMs = 3_000L,
+          slowThresholdMs = 10_000L,
+        )
+
+      val result =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "dynamic_test.srt",
+          dynamicBatchSizerOverride = dynamicSizer,
+          onRetryDelay = { _, _ -> },
+        )
+
+      assertTrue("Expected Success, got $result", result is SubtitleTranslationServiceResult.Success)
+      // Call 1 (2 blocks -> 429), Call 2 (2 blocks -> ok), Call 3 (2 blocks -> ok -> scale up to 5), Call 4 (5 blocks!)
+      assertTrue(
+        "Expected dynamic sizer to expand slice size > 2, observed=$observedSliceSizes",
+        observedSliceSizes.any { it > 2 },
+      )
+
+      val keyStats = app.apiUsageRepository.allKeyStats.first()
+      assertEquals(1, keyStats.sumOf { it.rateLimitHits })
+      assertTrue(
+        "Expected multiple successful Gemini requests recorded, got $keyStats",
+        keyStats.sumOf { it.successfulRequests } >= 3,
       )
     }
 }

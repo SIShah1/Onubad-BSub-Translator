@@ -2,6 +2,7 @@ package com.example
 
 import android.app.Application
 import androidx.annotation.VisibleForTesting
+import com.example.data.local.ApiUsageRepository
 import com.example.data.local.BSubDatabase
 import com.example.data.local.HistoryRepository
 import com.example.data.local.SubtitleHistoryRepository
@@ -37,6 +38,9 @@ class BSubApplication : Application() {
   val subtitleTranslationRepository: SubtitleTranslationRepository by lazy {
     SubtitleTranslationRepository(database.subtitleTranslationDao())
   }
+  val apiUsageRepository: ApiUsageRepository by lazy {
+    ApiUsageRepository(database.apiUsageDao())
+  }
   val settingsRepository: SettingsRepository by lazy { SettingsRepository(this) }
   val secureKeyStorage: SecureKeyStorage by lazy { SecureKeyStorage(this) }
   val subtitleFileStorage: SubtitleFileStorage by lazy { SubtitleFileStorage(this) }
@@ -45,6 +49,7 @@ class BSubApplication : Application() {
     ApiKeyRotationManager(
       keyStorage = secureKeyStorage,
       geminiApiClient = geminiApiClient,
+      apiUsageRepository = apiUsageRepository,
     )
   }
   val subtitleTranslationService: SubtitleTranslationService by lazy {
@@ -97,6 +102,7 @@ class BSubApplication : Application() {
           ApiKeyRotationManager(
             keyStorage = secureKeyStorage,
             geminiApiClient = customClient,
+            apiUsageRepository = apiUsageRepository,
           )
         TranslationCoordinator(
           settingsRepository = settingsRepository,

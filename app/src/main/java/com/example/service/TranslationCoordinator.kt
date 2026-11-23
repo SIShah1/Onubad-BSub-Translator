@@ -271,33 +271,42 @@ class TranslationCoordinator(
         currentAttempt = 1,
         maxAttempts = settings.effectiveMaxAttemptsPerKey,
         activePhaseMessage = "Starting translation...",
+        currentBatchSize = settings.effectiveChunkSize,
         logs = emptyList(),
       )
 
+    val dynamicSizer =
+      DynamicBatchSizer(
+        baseBatchSize = settings.effectiveChunkSize,
+        enabled = settings.dynamicBatchSizingEnabled,
+      )
+
     appendLog(
-      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.apiProvider.displayName} • ${settings.effectiveModel}, context: ${settings.effectiveContextLines} lines)",
+      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.apiProvider.displayName} • ${settings.effectiveModel}, context: ${settings.effectiveContextLines} lines, batch: ${dynamicSizer.currentBatchSize}${if (settings.dynamicBatchSizingEnabled) " dynamic" else " fixed"})",
       LogLevel.INFO,
     )
 
     for ((fileIdx, file) in request.files.withIndex()) {
       currentCoroutineContext().ensureActive()
       val displayFileNum = fileIdx + 1
-      val segmentedPlan =
-        subtitleTranslationService.parseAndSegment(
-          file = file,
-          chunkSize = settings.effectiveChunkSize,
-          contextLines = settings.effectiveContextLines,
-        )
-      val segments = segmentedPlan.segments
-      val totalBatches = segments.size.coerceAtLeast(1)
+      val parsedBlocks = file.blocks
+      val totalBatchesEstimate =
+        if (parsedBlocks.isEmpty()) 0
+        else
+          kotlin.math
+            .ceil(parsedBlocks.size.toDouble() / dynamicSizer.currentBatchSize.coerceAtLeast(1))
+            .toInt()
+            .coerceAtLeast(1)
 
       appendLog("File $displayFileNum/$totalFiles – Processing (${file.fileName})", LogLevel.INFO)
       _sessionState.update {
         it.copy(
           currentFileIndex = displayFileNum,
           currentFileName = file.fileName,
-          totalBatchesInCurrentFile = totalBatches,
+          totalBatchesInCurrentFile = totalBatchesEstimate.coerceAtLeast(1),
           currentBatchNumber = 1,
+          currentBatchSize = dynamicSizer.currentBatchSize,
+          recentAvgLatencyMs = dynamicSizer.averageLatencyMs(),
           activePhaseMessage = "File $displayFileNum/$totalFiles – Processing",
         )
       }
@@ -305,7 +314,7 @@ class TranslationCoordinator(
       val titleMeta = buildTitleMetadata(request)
       val expectedOutputName = SrtEngine.buildOutputFileName(file.fileName, settings)
 
-      if (segmentedPlan.isEmpty) {
+      if (parsedBlocks.isEmpty()) {
         historyRepository.saveRecord(
           TranslationHistoryEntity(
             originalFileName = file.fileName,
@@ -350,12 +359,12 @@ class TranslationCoordinator(
         subtitleTranslationRepository.seedPendingBlocksIfAbsent(
           jobId = fileJobId,
           fileName = file.fileName,
-          blocks = segmentedPlan.parsedBlocks,
+          blocks = parsedBlocks,
         )
       }
 
       val savedTranslatedByIndex = subtitleTranslationRepository.getTranslatedBlocksMapForJob(fileJobId)
-      val contextTranslatedByIndex = HashMap<Int, SrtBlock>(segmentedPlan.totalBlocks)
+      val contextTranslatedByIndex = HashMap<Int, SrtBlock>(parsedBlocks.size)
       savedTranslatedByIndex.forEach { (idx, savedRow) ->
         contextTranslatedByIndex[idx] =
           SrtBlock(
@@ -364,18 +373,35 @@ class TranslationCoordinator(
             lines = savedRow.lines,
           )
       }
-      val translatedFileBlocks = ArrayList<SrtBlock>(segmentedPlan.totalBlocks)
+      val translatedFileBlocks = ArrayList<SrtBlock>(parsedBlocks.size)
 
       try {
-        for (segment in segments) {
+        var nextStartIdx = 0
+        var displayBatchNum = 1
+        while (nextStartIdx < parsedBlocks.size) {
           currentCoroutineContext().ensureActive()
-          val displayBatchNum = segment.segmentIndex
+          val currentBatchSize = dynamicSizer.currentBatchSize.coerceAtLeast(1)
 
-          val resumedBlocks =
+          // Check if the leading slice is already translated in Room for fast resume
+          val resumedRunCount =
             if (savedTranslatedByIndex.isNotEmpty() &&
-              segment.blocks.all { savedTranslatedByIndex.containsKey(it.index) }
+              savedTranslatedByIndex.containsKey(parsedBlocks[nextStartIdx].index)
             ) {
-              segment.blocks.mapNotNull { orig ->
+              var runEnd = nextStartIdx
+              val cap = (nextStartIdx + currentBatchSize).coerceAtMost(parsedBlocks.size)
+              while (
+                runEnd < cap && savedTranslatedByIndex.containsKey(parsedBlocks[runEnd].index)
+              ) {
+                runEnd++
+              }
+              runEnd - nextStartIdx
+            } else {
+              0
+            }
+
+          if (resumedRunCount > 0) {
+            val resumedSlice =
+              parsedBlocks.subList(nextStartIdx, nextStartIdx + resumedRunCount).mapNotNull { orig ->
                 savedTranslatedByIndex[orig.index]?.let { saved ->
                   SrtBlock(
                     index = orig.index,
@@ -384,36 +410,63 @@ class TranslationCoordinator(
                   )
                 }
               }
-            } else {
-              null
-            }
-
-          if (resumedBlocks != null && resumedBlocks.size == segment.blocks.size) {
-            translatedFileBlocks.addAll(resumedBlocks)
-            resumedBlocks.forEach { contextTranslatedByIndex[it.index] = it }
-            completedBlocksAllFiles += resumedBlocks.size
+            translatedFileBlocks.addAll(resumedSlice)
+            resumedSlice.forEach { contextTranslatedByIndex[it.index] = it }
+            completedBlocksAllFiles += resumedSlice.size
             historyRepository.updateBatchProgress(
               historyId = historyId,
               translatedBlocks = translatedFileBlocks.size,
             )
-            appendLog("Batch $displayBatchNum/$totalBatches – Resumed from Room cache", LogLevel.INFO)
+            val remainingAfter = parsedBlocks.size - (nextStartIdx + resumedRunCount)
+            val updatedTotalBatches =
+              displayBatchNum +
+                kotlin.math.ceil(remainingAfter.toDouble() / currentBatchSize).toInt()
+            appendLog(
+              "Batch $displayBatchNum/$updatedTotalBatches – Resumed from Room cache",
+              LogLevel.INFO,
+            )
             _sessionState.update {
               it.copy(
                 currentBatchNumber = displayBatchNum,
+                totalBatchesInCurrentFile = updatedTotalBatches,
                 completedBlocksAllFiles = completedBlocksAllFiles,
-                activePhaseMessage = "Batch $displayBatchNum/$totalBatches – Resumed",
+                activePhaseMessage = "Batch $displayBatchNum/$updatedTotalBatches – Resumed",
               )
             }
+            nextStartIdx += resumedRunCount
+            displayBatchNum++
             continue
           }
+
+          val remainingBlocks = parsedBlocks.size - nextStartIdx
+          val dynamicTotalBatches =
+            displayBatchNum - 1 +
+              kotlin.math.ceil(remainingBlocks.toDouble() / currentBatchSize).toInt().coerceAtLeast(1)
+
+          val segment =
+            subtitleTranslationService.buildDynamicSlice(
+              allBlocks = parsedBlocks,
+              startIdx = nextStartIdx,
+              batchSize = currentBatchSize,
+              segmentIndex = displayBatchNum,
+              estimatedTotalSegments = dynamicTotalBatches,
+              contextLines = settings.effectiveContextLines,
+              translatedByIndex = contextTranslatedByIndex,
+            )
 
           _sessionState.update {
             it.copy(
               currentBatchNumber = displayBatchNum,
-              activePhaseMessage = "Batch $displayBatchNum/$totalBatches – Processing",
+              totalBatchesInCurrentFile = dynamicTotalBatches,
+              currentBatchSize = currentBatchSize,
+              recentAvgLatencyMs = dynamicSizer.averageLatencyMs(),
+              activePhaseMessage = "Batch $displayBatchNum/$dynamicTotalBatches – Processing",
             )
           }
-          appendLog("Batch $displayBatchNum/$totalBatches – Processing", LogLevel.INFO)
+          appendLog(
+            "Batch $displayBatchNum/$dynamicTotalBatches – Processing (${segment.blocks.size} blocks)",
+            LogLevel.INFO,
+          )
 
           val rotationResult =
             subtitleTranslationService.translateSegmentWithRotation(
@@ -425,7 +478,7 @@ class TranslationCoordinator(
               secondaryMeta = request.secondaryMeta,
               fileName = file.fileName,
               workId = workId,
-              allBlocks = segmentedPlan.parsedBlocks,
+              allBlocks = parsedBlocks,
               translatedByIndex = contextTranslatedByIndex,
               onAttemptStarted = { keyNum, keyLabel, attempt, maxAttempts ->
                 _sessionState.update {
@@ -437,7 +490,7 @@ class TranslationCoordinator(
                     maxAttempts = maxAttempts,
                     cooldownRemainingSeconds = 0,
                     activePhaseMessage =
-                      "File $displayFileNum/$totalFiles • Batch $displayBatchNum/$totalBatches",
+                      "File $displayFileNum/$totalFiles • Batch $displayBatchNum/$dynamicTotalBatches",
                   )
                 }
               },
@@ -446,11 +499,10 @@ class TranslationCoordinator(
               onCooldownWait = { minutes -> runCooldownTimer(minutes) },
             )
 
-          val validatedBlocks =
+          val successOutcome =
             when (rotationResult) {
-              is RotationExecutionResult.Success -> rotationResult.value
+              is RotationExecutionResult.Success -> rotationResult
               is RotationExecutionResult.Failure -> {
-                // Preserve any validated batches completed so far for this file
                 finalizeIncompleteHistory(
                   historyId = historyId,
                   file = file,
@@ -464,7 +516,7 @@ class TranslationCoordinator(
                 TranslationLogger.logWorkerError(
                   workId = workId,
                   message =
-                    "${file.fileName} batch $displayBatchNum/$totalBatches aborted: ${rotationResult.fatalError}",
+                    "${file.fileName} batch $displayBatchNum/$dynamicTotalBatches aborted: ${rotationResult.fatalError}",
                 )
                 _sessionState.update {
                   it.copy(
@@ -475,6 +527,13 @@ class TranslationCoordinator(
                 return
               }
             }
+          val validatedBlocks = successOutcome.value
+          val adjustment =
+            dynamicSizer.recordSuccessLatency(
+              latencyMs = successOutcome.latencyMs,
+              rateLimitHitsInBatch = successOutcome.rateLimitHitsInBatch,
+            )
+
           translatedFileBlocks.addAll(validatedBlocks)
           validatedBlocks.forEach { contextTranslatedByIndex[it.index] = it }
           subtitleTranslationRepository.markBatchTranslated(
@@ -487,13 +546,30 @@ class TranslationCoordinator(
           )
           completedBlocksAllFiles += validatedBlocks.size
 
-          appendLog("Batch $displayBatchNum/$totalBatches – Completed", LogLevel.SUCCESS)
+          appendLog(
+            "Batch $displayBatchNum/$dynamicTotalBatches – Completed (${successOutcome.latencyMs}ms)",
+            LogLevel.SUCCESS,
+          )
+          if (adjustment.sizeChanged) {
+            val avgSec =
+              adjustment.averageLatencyMs?.let { String.format(Locale.US, "%.1fs", it / 1000f) }
+                ?: "-"
+            val dir = if (adjustment.newSize > adjustment.previousSize) "Scaled up" else "Scaled down"
+            appendLog(
+              "Dynamic batching: $dir ${adjustment.previousSize} -> ${adjustment.newSize} blocks (avg latency $avgSec)",
+              LogLevel.INFO,
+            )
+          }
           _sessionState.update {
             it.copy(
               completedBlocksAllFiles = completedBlocksAllFiles,
-              activePhaseMessage = "Batch $displayBatchNum/$totalBatches – Completed",
+              currentBatchSize = dynamicSizer.currentBatchSize,
+              recentAvgLatencyMs = dynamicSizer.averageLatencyMs(),
+              activePhaseMessage = "Batch $displayBatchNum/$dynamicTotalBatches – Completed",
             )
           }
+          nextStartIdx = segment.endBlockIndexExclusive
+          displayBatchNum++
         }
       } catch (cancel: CancellationException) {
         finalizeIncompleteHistory(
@@ -511,7 +587,7 @@ class TranslationCoordinator(
       // All segments for this file completed & validated -> Reconstruct output SRT preserving timecodes
       val formattedSrt =
         SrtParser.reconstructFromBlocks(
-          originalBlocks = segmentedPlan.parsedBlocks,
+          originalBlocks = parsedBlocks,
           translatedBlocks = translatedFileBlocks,
           strictTimecodeCheck = true,
         )
@@ -520,7 +596,7 @@ class TranslationCoordinator(
         fileStorage.saveOriginalSourceBackup(
           translatedLocalBackupPath = savedOutput.localBackupPath,
           originalFileName = file.fileName,
-          blocks = segmentedPlan.parsedBlocks,
+          blocks = parsedBlocks,
         )
       }
 

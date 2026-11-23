@@ -10,6 +10,8 @@ import com.example.domain.model.InputMode
 import com.example.domain.model.NamingMode
 import com.example.domain.model.ParamMode
 import com.example.domain.model.SrtBlock
+import com.example.service.BatchAdjustmentReason
+import com.example.service.DynamicBatchSizer
 import com.example.srt.BatchReconciliationResult
 import com.example.srt.SrtEngine
 import com.example.srt.SrtParser
@@ -592,5 +594,50 @@ class ExampleUnitTest {
       "Expected InvalidKey for OpenAI-style 401, got $badBearerKey",
       badBearerKey is GeminiCallResult.InvalidKey,
     )
+  }
+
+  @Test
+  fun `dynamic batch sizer scales up when api is responsive and shrinks on slow latency or rate limits`() {
+    val sizer =
+      DynamicBatchSizer(
+        baseBatchSize = 100,
+        enabled = true,
+        minBatchSize = 40,
+        maxBatchSize = 250,
+        windowSize = 3,
+        fastThresholdMs = 3_000L,
+        slowThresholdMs = 10_000L,
+      )
+    assertEquals(100, sizer.currentBatchSize)
+
+    // Fast response -> scales up (+25 -> 125)
+    val up1 = sizer.recordSuccessLatency(latencyMs = 1_200L)
+    assertEquals(BatchAdjustmentReason.SCALED_UP, up1.reason)
+    assertEquals(125, up1.newSize)
+    assertEquals(125, sizer.currentBatchSize)
+
+    // Balanced response (avg (1200 + 6000)/2 = 3600ms) -> stays steady
+    val steady = sizer.recordSuccessLatency(latencyMs = 6_000L)
+    assertEquals(BatchAdjustmentReason.STEADY, steady.reason)
+    assertEquals(125, steady.newSize)
+
+    // Slow latency pushes rolling avg above 10s -> scales down
+    sizer.recordSuccessLatency(latencyMs = 18_000L)
+    val down = sizer.recordSuccessLatency(latencyMs = 16_000L)
+    assertEquals(BatchAdjustmentReason.SCALED_DOWN_LATENCY, down.reason)
+    assertTrue("Expected reduced batch size, got ${down.newSize}", down.newSize < 125)
+
+    // Rate limit hits scale down immediately toward minBatchSize
+    val beforeRateLimit = sizer.currentBatchSize
+    val rlDown = sizer.recordSuccessLatency(latencyMs = 1_500L, rateLimitHitsInBatch = 2)
+    assertEquals(BatchAdjustmentReason.SCALED_DOWN_RATE_LIMIT, rlDown.reason)
+    assertTrue(rlDown.newSize < beforeRateLimit)
+    assertTrue(sizer.currentBatchSize >= 40)
+
+    // Disabled sizer stays fixed at baseBatchSize
+    val fixedSizer = DynamicBatchSizer(baseBatchSize = 150, enabled = false)
+    val fixedRes = fixedSizer.recordSuccessLatency(latencyMs = 500L)
+    assertEquals(150, fixedRes.newSize)
+    assertEquals(150, fixedSizer.currentBatchSize)
   }
 }

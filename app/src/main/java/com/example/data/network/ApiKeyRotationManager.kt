@@ -1,5 +1,7 @@
 package com.example.data.network
 
+import com.example.data.local.ApiRequestOutcome
+import com.example.data.local.ApiUsageRepository
 import com.example.data.preferences.SecureKeyStorage
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
@@ -10,6 +12,7 @@ import com.example.domain.model.InputMode
 import com.example.domain.model.LogLevel
 import com.example.logging.ErrorCategory
 import com.example.logging.TranslationLogger
+import com.example.srt.SrtParser
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -79,6 +82,8 @@ sealed interface RotationExecutionResult<out T> {
     val value: T,
     val usedKeyNumber: Int,
     val usedKeyLabel: String,
+    val latencyMs: Long = 0L,
+    val rateLimitHitsInBatch: Int = 0,
   ) : RotationExecutionResult<T>
 
   data class Failure(
@@ -90,6 +95,7 @@ sealed interface RotationExecutionResult<out T> {
 class ApiKeyRotationManager(
   private val keyStorage: SecureKeyStorage,
   private val geminiApiClient: GeminiApiClient,
+  private val apiUsageRepository: ApiUsageRepository? = null,
 ) {
 
   companion object {
@@ -233,6 +239,7 @@ class ApiKeyRotationManager(
     workId: String? = null,
     surroundingContext: String = "",
     provider: ApiProvider = session.provider,
+    blockCount: Int = 0,
     validateOutput: (String) -> BatchValidationOutcome<T>,
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
@@ -252,10 +259,13 @@ class ApiKeyRotationManager(
       )
     }
 
+    val resolvedBlockCount =
+      if (blockCount > 0) blockCount else SrtParser.parseBlocks(batchSrtPayload).size
     val safeMaxAttempts = maxAttemptsPerKey.coerceAtLeast(1)
     val safeRetrySeconds = retryIntervalSeconds.coerceAtLeast(1)
     var cooldownCycles = 0
     var consecutiveValidationFailures = 0
+    var rateLimitHitsInBatch = 0
 
     while (true) {
       currentCoroutineContext().ensureActive()
@@ -316,6 +326,7 @@ class ApiKeyRotationManager(
         currentCoroutineContext().ensureActive()
         onAttemptStarted(keyNum, activeKey.label, attempt, safeMaxAttempts)
 
+        val requestStartNs = System.nanoTime()
         val apiResult =
           geminiApiClient.translateBatch(
             apiKey = activeKey.key,
@@ -334,19 +345,44 @@ class ApiKeyRotationManager(
             surroundingContext = surroundingContext,
             provider = provider,
           )
+        val callLatencyMs = ((System.nanoTime() - requestStartNs) / 1_000_000L).coerceAtLeast(1L)
 
         when (apiResult) {
           is GeminiCallResult.Success -> {
             when (val validation = validateOutput(apiResult.translatedText)) {
               is BatchValidationOutcome.Valid -> {
+                recordUsageEvent(
+                  keyId = activeKey.id,
+                  keyLabel = activeKey.label,
+                  provider = provider,
+                  model = model,
+                  batchSize = resolvedBlockCount,
+                  latencyMs = callLatencyMs,
+                  outcome = ApiRequestOutcome.SUCCESS,
+                  httpCode = 200,
+                  blocksTranslated = resolvedBlockCount,
+                )
                 return RotationExecutionResult.Success(
                   value = validation.value,
                   usedKeyNumber = keyNum,
                   usedKeyLabel = activeKey.label,
+                  latencyMs = callLatencyMs,
+                  rateLimitHitsInBatch = rateLimitHitsInBatch,
                 )
               }
               is BatchValidationOutcome.Invalid -> {
                 consecutiveValidationFailures++
+                recordUsageEvent(
+                  keyId = activeKey.id,
+                  keyLabel = activeKey.label,
+                  provider = provider,
+                  model = model,
+                  batchSize = resolvedBlockCount,
+                  latencyMs = callLatencyMs,
+                  outcome = ApiRequestOutcome.RETRYABLE_ERROR,
+                  httpCode = 200,
+                  errorReason = validation.reason,
+                )
                 TranslationLogger.logValidationError(
                   fileName = fileName,
                   batchNumber = batchIndex,
@@ -404,6 +440,17 @@ class ApiKeyRotationManager(
           is GeminiCallResult.QuotaExhausted -> {
             consecutiveValidationFailures = 0
             session.dailyQuotaExhaustedIndices.add(keyIdx)
+            recordUsageEvent(
+              keyId = activeKey.id,
+              keyLabel = activeKey.label,
+              provider = provider,
+              model = model,
+              batchSize = resolvedBlockCount,
+              latencyMs = callLatencyMs,
+              outcome = ApiRequestOutcome.QUOTA_EXHAUSTED,
+              httpCode = 429,
+              errorReason = apiResult.reason,
+            )
             TranslationLogger.logApiFailure(
               category = ErrorCategory.API_QUOTA_EXHAUSTED,
               keyLabel = "Key #$keyNum (${activeKey.label})",
@@ -424,7 +471,19 @@ class ApiKeyRotationManager(
 
           is GeminiCallResult.RateLimited -> {
             consecutiveValidationFailures = 0
+            rateLimitHitsInBatch++
             session.rateLimitedIndices.add(keyIdx)
+            recordUsageEvent(
+              keyId = activeKey.id,
+              keyLabel = activeKey.label,
+              provider = provider,
+              model = model,
+              batchSize = resolvedBlockCount,
+              latencyMs = callLatencyMs,
+              outcome = ApiRequestOutcome.RATE_LIMITED,
+              httpCode = 429,
+              errorReason = apiResult.reason,
+            )
             TranslationLogger.logApiFailure(
               category = ErrorCategory.API_QUOTA_EXHAUSTED,
               keyLabel = "Key #$keyNum (${activeKey.label})",
@@ -445,6 +504,17 @@ class ApiKeyRotationManager(
 
           is GeminiCallResult.InvalidKey -> {
             consecutiveValidationFailures = 0
+            recordUsageEvent(
+              keyId = activeKey.id,
+              keyLabel = activeKey.label,
+              provider = provider,
+              model = model,
+              batchSize = resolvedBlockCount,
+              latencyMs = callLatencyMs,
+              outcome = ApiRequestOutcome.INVALID_KEY,
+              httpCode = 401,
+              errorReason = apiResult.reason,
+            )
             TranslationLogger.logApiFailure(
               category = ErrorCategory.API_INVALID_KEY,
               keyLabel = "Key #$keyNum (${activeKey.label})",
@@ -465,6 +535,17 @@ class ApiKeyRotationManager(
 
           is GeminiCallResult.FatalError -> {
             consecutiveValidationFailures = 0
+            recordUsageEvent(
+              keyId = activeKey.id,
+              keyLabel = activeKey.label,
+              provider = provider,
+              model = model,
+              batchSize = resolvedBlockCount,
+              latencyMs = callLatencyMs,
+              outcome = ApiRequestOutcome.FATAL_ERROR,
+              httpCode = apiResult.httpCode,
+              errorReason = apiResult.reason,
+            )
             TranslationLogger.logApiFailure(
               category = ErrorCategory.API_RETRYABLE_ERROR,
               keyLabel = "Key #$keyNum (${activeKey.label})",
@@ -485,6 +566,23 @@ class ApiKeyRotationManager(
 
           is GeminiCallResult.RetryableError -> {
             consecutiveValidationFailures = 0
+            val isRateLimit = apiResult.httpCode == 429
+            if (isRateLimit) {
+              rateLimitHitsInBatch++
+            }
+            recordUsageEvent(
+              keyId = activeKey.id,
+              keyLabel = activeKey.label,
+              provider = provider,
+              model = model,
+              batchSize = resolvedBlockCount,
+              latencyMs = callLatencyMs,
+              outcome =
+                if (isRateLimit) ApiRequestOutcome.RATE_LIMITED
+                else ApiRequestOutcome.RETRYABLE_ERROR,
+              httpCode = apiResult.httpCode,
+              errorReason = apiResult.reason,
+            )
             TranslationLogger.logApiFailure(
               category = ErrorCategory.API_RETRYABLE_ERROR,
               keyLabel = "Key #$keyNum (${activeKey.label})",
@@ -505,7 +603,6 @@ class ApiKeyRotationManager(
               }
             onStatusLog("Key #$keyNum – $shortReason", LogLevel.WARNING)
 
-            val isRateLimit = apiResult.httpCode == 429
             if (!isRateLimit && attempt < safeMaxAttempts) {
               onStatusLog("Retrying in ${safeRetrySeconds}s", LogLevel.INFO)
               onRetryDelay(safeRetrySeconds, "Retrying in")
@@ -587,6 +684,36 @@ class ApiKeyRotationManager(
       onRetryDelay = onRetryDelay,
       onCooldownWait = onCooldownWait,
     )
+  }
+
+  private suspend fun recordUsageEvent(
+    keyId: String,
+    keyLabel: String,
+    provider: ApiProvider,
+    model: String,
+    batchSize: Int,
+    latencyMs: Long,
+    outcome: ApiRequestOutcome,
+    httpCode: Int? = null,
+    blocksTranslated: Int = 0,
+    errorReason: String? = null,
+  ) {
+    val repo = apiUsageRepository ?: return
+    runCatching {
+      repo.recordRequestOutcome(
+        keyId = keyId,
+        keyLabel = keyLabel,
+        provider = provider,
+        model = model,
+        batchSize = batchSize,
+        dynamicBatchSizeAfter = batchSize,
+        latencyMs = latencyMs,
+        outcome = outcome,
+        httpCode = httpCode,
+        blocksTranslated = blocksTranslated,
+        errorReason = errorReason,
+      )
+    }
   }
 
   private fun publishState(session: KeyRotationSession, inCooldown: Boolean) {

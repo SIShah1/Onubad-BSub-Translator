@@ -9,8 +9,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-  entities = [TranslationHistoryEntity::class, SubtitleTranslation::class, SubtitleHistory::class],
-  version = 4,
+  entities = [
+    TranslationHistoryEntity::class,
+    SubtitleTranslation::class,
+    SubtitleHistory::class,
+    ApiKeyUsageStat::class,
+    ApiUsageEvent::class,
+  ],
+  version = 5,
   exportSchema = false,
 )
 @TypeConverters(SubtitleTranslationConverters::class, HistoryConverters::class)
@@ -20,6 +26,8 @@ abstract class BSubDatabase : RoomDatabase() {
   abstract fun subtitleTranslationDao(): SubtitleTranslationDao
 
   abstract fun subtitleHistoryDao(): SubtitleHistoryDao
+
+  abstract fun apiUsageDao(): ApiUsageDao
 
   companion object {
     @Volatile private var instance: BSubDatabase? = null
@@ -134,6 +142,55 @@ abstract class BSubDatabase : RoomDatabase() {
         }
       }
 
+    val MIGRATION_4_5 =
+      object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `api_key_usage_stats` (
+              `keyId` TEXT NOT NULL,
+              `keyLabel` TEXT NOT NULL,
+              `provider` TEXT NOT NULL,
+              `successfulRequests` INTEGER NOT NULL,
+              `rateLimitHits` INTEGER NOT NULL,
+              `quotaExhaustedHits` INTEGER NOT NULL,
+              `retryableErrors` INTEGER NOT NULL,
+              `invalidKeyHits` INTEGER NOT NULL,
+              `totalLatencyMs` INTEGER NOT NULL,
+              `latencySamples` INTEGER NOT NULL,
+              `lastLatencyMs` INTEGER NOT NULL,
+              `blocksTranslated` INTEGER NOT NULL,
+              `lastOutcome` TEXT NOT NULL,
+              `lastError` TEXT,
+              `lastUsedAtEpochMs` INTEGER NOT NULL,
+              PRIMARY KEY(`keyId`)
+            )
+            """.trimIndent()
+          )
+          db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `api_usage_events` (
+              `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+              `keyId` TEXT NOT NULL,
+              `keyLabel` TEXT NOT NULL,
+              `provider` TEXT NOT NULL,
+              `model` TEXT NOT NULL,
+              `batchSize` INTEGER NOT NULL,
+              `dynamicBatchSizeAfter` INTEGER NOT NULL,
+              `latencyMs` INTEGER NOT NULL,
+              `outcome` TEXT NOT NULL,
+              `httpCode` INTEGER,
+              `blocksTranslated` INTEGER NOT NULL,
+              `recordedAtEpochMs` INTEGER NOT NULL
+            )
+            """.trimIndent()
+          )
+          db.execSQL(
+            "CREATE INDEX IF NOT EXISTS `index_api_usage_events_provider_recordedAtEpochMs` ON `api_usage_events` (`provider`, `recordedAtEpochMs`)"
+          )
+        }
+      }
+
     fun getInstance(context: Context): BSubDatabase {
       return instance
         ?: synchronized(this) {
@@ -143,7 +200,7 @@ abstract class BSubDatabase : RoomDatabase() {
                 BSubDatabase::class.java,
                 "bsub_translator.db",
               )
-              .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+              .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
               .build()
               .also { instance = it }
         }

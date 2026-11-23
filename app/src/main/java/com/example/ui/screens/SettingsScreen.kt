@@ -46,6 +46,7 @@ import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -523,6 +524,38 @@ private fun AdvancedSettingsCard(
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         modifier = Modifier.fillMaxWidth().testTag("manual_chunk_size_input"),
       )
+    }
+
+    Spacer(modifier = Modifier.height(10.dp))
+    Surface(
+      shape = RoundedCornerShape(12.dp),
+      color = MaterialTheme.colorScheme.surfaceContainerLow,
+      border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+      ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+          Text(
+            text = "Dynamic Latency-Based Batching",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+          Text(
+            text =
+              "Auto-scales batch size up when recent API latency <= 3s and shrinks if slow (>10s) or rate-limited.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+        }
+        Switch(
+          checked = settings.dynamicBatchSizingEnabled,
+          onCheckedChange = viewModel::setDynamicBatchSizing,
+          modifier = Modifier.minimumInteractiveComponentSize().testTag("dynamic_batch_sizing_switch"),
+        )
+      }
     }
 
     Spacer(modifier = Modifier.height(12.dp))

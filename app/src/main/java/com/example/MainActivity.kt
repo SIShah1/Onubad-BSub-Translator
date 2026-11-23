@@ -17,10 +17,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.outlined.Analytics
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Settings
@@ -61,6 +63,7 @@ import com.example.ui.screens.HistoryScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StudioScreen
 import com.example.ui.screens.SubtitlePreviewScreen
+import com.example.ui.screens.UsageDashboardScreen
 import com.example.ui.theme.ThemeProvider
 import com.example.ui.viewmodel.MainViewModel
 import kotlinx.coroutines.flow.collectLatest
@@ -85,6 +88,13 @@ private enum class AppDestination(
     selectedIcon = Icons.Filled.Key,
     unselectedIcon = Icons.Outlined.Key,
     testTag = "nav_keys",
+  ),
+  DASHBOARD(
+    route = "usage",
+    label = "Usage",
+    selectedIcon = Icons.Filled.Analytics,
+    unselectedIcon = Icons.Outlined.Analytics,
+    testTag = "nav_dashboard",
   ),
   HISTORY(
     route = "history",
@@ -136,6 +146,8 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
   val historyItems by viewModel.historyItems.collectAsStateWithLifecycle()
   val historySearchQuery by viewModel.historySearchQuery.collectAsStateWithLifecycle()
   val historyContentSnippets by viewModel.historyContentSnippets.collectAsStateWithLifecycle()
+  val apiKeyUsageStats by viewModel.apiKeyUsageStats.collectAsStateWithLifecycle()
+  val recentApiUsageEvents by viewModel.recentApiUsageEvents.collectAsStateWithLifecycle()
   val previewState by viewModel.previewState.collectAsStateWithLifecycle()
 
   val navController = rememberNavController()
@@ -284,6 +296,17 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 onRemoveKey = viewModel::removeApiKey,
                 onClearAllKeys = viewModel::clearAllApiKeys,
                 onResetAllStatuses = viewModel::resetAllKeyStatuses,
+              )
+            }
+
+            composable(AppDestination.DASHBOARD.route) {
+              UsageDashboardScreen(
+                keyStats = apiKeyUsageStats,
+                recentEvents = recentApiUsageEvents,
+                configuredKeys = apiKeys,
+                settings = settings,
+                sessionState = sessionState,
+                onClearUsageStats = viewModel::clearApiUsageStats,
               )
             }
 

@@ -66,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -158,7 +159,9 @@ fun StudioScreen(
     // 1. Studio Atmospheric Banner Header
     StudioHeroBanner(
       modelName = settings.effectiveModel,
-      chunkSize = settings.effectiveChunkSize,
+      chunkSize =
+        if (isRunning && sessionState.currentBatchSize > 0) sessionState.currentBatchSize
+        else settings.effectiveChunkSize,
       totalKeysCount = providerKeys.size,
       activeKeysCount = activeKeysCount,
       onNavigateToKeys = onNavigateToKeys,
@@ -822,7 +825,7 @@ internal fun MetricTile(
   modifier: Modifier = Modifier,
 ) {
   Surface(
-    modifier = modifier,
+    modifier = modifier.semantics(mergeDescendants = true) {},
     shape = RoundedCornerShape(12.dp),
     color = MaterialTheme.colorScheme.surfaceContainer,
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),

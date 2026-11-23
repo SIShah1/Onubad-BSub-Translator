@@ -54,6 +54,7 @@ class SettingsRepository(private val context: Context) {
     val CONTEXT_LINES_MODE = stringPreferencesKey("context_lines_mode")
     val MANUAL_CONTEXT_LINES = intPreferencesKey("manual_context_lines")
     val API_PROVIDER = stringPreferencesKey("api_provider")
+    val DYNAMIC_BATCH_SIZING_ENABLED = booleanPreferencesKey("dynamic_batch_sizing_enabled")
   }
 
   val settingsFlow: Flow<AppSettings> =
@@ -91,6 +92,8 @@ class SettingsRepository(private val context: Context) {
         manualContextLines =
           prefs[Keys.MANUAL_CONTEXT_LINES] ?: DefaultConfig.CONTEXT_LINES,
         apiProvider = enumOrDefault(prefs[Keys.API_PROVIDER], ApiProvider.GEMINI),
+        dynamicBatchSizingEnabled =
+          prefs[Keys.DYNAMIC_BATCH_SIZING_ENABLED] ?: DefaultConfig.DYNAMIC_BATCH_SIZING,
       )
     }
 
@@ -200,6 +203,12 @@ class SettingsRepository(private val context: Context) {
   suspend fun setApiProvider(provider: ApiProvider) {
     context.settingsDataStore.edit {
       it[Keys.API_PROVIDER] = provider.name
+    }
+  }
+
+  suspend fun setDynamicBatchSizing(enabled: Boolean) {
+    context.settingsDataStore.edit {
+      it[Keys.DYNAMIC_BATCH_SIZING_ENABLED] = enabled
     }
   }
 

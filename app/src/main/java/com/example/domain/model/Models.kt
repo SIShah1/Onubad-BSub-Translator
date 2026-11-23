@@ -107,6 +107,12 @@ object DefaultConfig {
   const val CONTEXT_LINES = 50
   const val MIN_CONTEXT_LINES = 0
   const val MAX_CONTEXT_LINES = 500
+  const val DYNAMIC_BATCH_SIZING = true
+  const val DYNAMIC_BATCH_WINDOW = 5
+  const val DYNAMIC_FAST_LATENCY_MS = 3_000L
+  const val DYNAMIC_SLOW_LATENCY_MS = 10_000L
+  const val DYNAMIC_MIN_CHUNK_FLOOR = 25
+  const val DYNAMIC_MAX_CHUNK_CEILING = 400
 
   val PRESET_CHUNK_SIZES = listOf(100, 150, 200, 300)
   val PRESET_CONTEXT_LINES = listOf(0, 25, 50, 100, 150)
@@ -173,6 +179,7 @@ data class AppSettings(
   val contextLinesMode: ParamMode = ParamMode.DEFAULT,
   val manualContextLines: Int = DefaultConfig.CONTEXT_LINES,
   val apiProvider: ApiProvider = ApiProvider.GEMINI,
+  val dynamicBatchSizingEnabled: Boolean = DefaultConfig.DYNAMIC_BATCH_SIZING,
 ) {
   val effectivePrompt: String
     get() =
@@ -270,6 +277,8 @@ data class TranslationSessionState(
   val maxAttempts: Int = DefaultConfig.MAX_ATTEMPTS_PER_KEY,
   val cooldownRemainingSeconds: Int = 0,
   val activePhaseMessage: String = "Ready to translate",
+  val currentBatchSize: Int = DefaultConfig.CHUNK_SIZE,
+  val recentAvgLatencyMs: Long? = null,
   val logs: List<ProcessingLogEntry> = emptyList(),
 ) {
   val isRunningOrCooldown: Boolean

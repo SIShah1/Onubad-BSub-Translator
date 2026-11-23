@@ -185,6 +185,37 @@ class SubtitleTranslationService(
     )
   }
 
+  fun buildDynamicSlice(
+    allBlocks: List<SrtBlock>,
+    startIdx: Int,
+    batchSize: Int,
+    segmentIndex: Int,
+    estimatedTotalSegments: Int,
+    contextLines: Int = DefaultConfig.CONTEXT_LINES,
+    translatedByIndex: Map<Int, SrtBlock> = emptyMap(),
+  ): SubtitleSegment {
+    val safeStart = startIdx.coerceIn(0, allBlocks.size)
+    val safeEnd = (safeStart + batchSize.coerceAtLeast(1)).coerceAtMost(allBlocks.size)
+    val sliceBlocks = allBlocks.subList(safeStart, safeEnd)
+    val surroundingContext =
+      SrtEngine.buildSurroundingContext(
+        allBlocks = allBlocks,
+        startIdx = safeStart,
+        endIdxExclusive = safeEnd,
+        maxContextLines = contextLines,
+        translatedByIndex = translatedByIndex,
+      )
+    return SubtitleSegment(
+      segmentIndex = segmentIndex,
+      totalSegments = estimatedTotalSegments.coerceAtLeast(segmentIndex),
+      blocks = sliceBlocks,
+      formattedSrtPayload = SrtParser.formatBlocks(sliceBlocks),
+      startBlockIndex = safeStart,
+      endBlockIndexExclusive = safeEnd,
+      surroundingContext = surroundingContext,
+    )
+  }
+
   fun prepareTranslationRequest(
     segment: SubtitleSegment,
     settings: AppSettings,
@@ -320,6 +351,7 @@ class SubtitleTranslationService(
         workId = workId,
         surroundingContext = sliceContext,
         provider = settings.apiProvider,
+        blockCount = blocks.size,
         validateOutput = { rawText ->
           val parsedOutput = SrtEngine.parseModelOutput(rawText)
           when (val reconciled = SrtEngine.reconcileBatch(blocks, parsedOutput)) {
@@ -414,6 +446,8 @@ class SubtitleTranslationService(
         value = firstResult.value + secondResult.value,
         usedKeyNumber = secondResult.usedKeyNumber,
         usedKeyLabel = secondResult.usedKeyLabel,
+        latencyMs = ((firstResult.latencyMs + secondResult.latencyMs) / 2L).coerceAtLeast(1L),
+        rateLimitHitsInBatch = firstResult.rateLimitHitsInBatch + secondResult.rateLimitHitsInBatch,
       )
     }
 
@@ -428,6 +462,7 @@ class SubtitleTranslationService(
     secondaryMeta: String = "",
     chunkSizeOverride: Int? = null,
     workId: String? = null,
+    dynamicBatchSizerOverride: DynamicBatchSizer? = null,
     onSegmentCompleted: suspend (segment: SubtitleSegment, translatedBlocks: List<SrtBlock>) -> Unit = { _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
     onRetryDelay: suspend (seconds: Int, prefix: String) -> Unit = { seconds, _ ->
@@ -441,15 +476,8 @@ class SubtitleTranslationService(
     },
   ): SubtitleTranslationServiceResult {
     val settings = settingsRepository.getSettingsSnapshot()
-    val effectiveChunkSize = (chunkSizeOverride ?: settings.effectiveChunkSize).coerceAtLeast(1)
-    val plan =
-      parseAndSegment(
-        rawSrtContent = rawSrtContent,
-        chunkSize = effectiveChunkSize,
-        fileName = fileName,
-        contextLines = settings.effectiveContextLines,
-      )
-    if (plan.isEmpty) {
+    val parsedBlocks = SrtParser.parseBlocks(rawSrtContent)
+    if (parsedBlocks.isEmpty()) {
       return SubtitleTranslationServiceResult.Failure(
         reason = "No valid SRT subtitle blocks found in $fileName"
       )
@@ -462,10 +490,38 @@ class SubtitleTranslationService(
       )
     }
 
-    val accumulated = ArrayList<SrtBlock>(plan.totalBlocks)
-    val translatedContextMap = HashMap<Int, SrtBlock>(plan.totalBlocks)
-    for (segment in plan.segments) {
+    val baseChunkSize = (chunkSizeOverride ?: settings.effectiveChunkSize).coerceAtLeast(1)
+    val dynamicSizer =
+      dynamicBatchSizerOverride
+        ?: if (chunkSizeOverride == null && settings.dynamicBatchSizingEnabled) {
+          DynamicBatchSizer(baseBatchSize = baseChunkSize, enabled = true)
+        } else {
+          null
+        }
+
+    val accumulated = ArrayList<SrtBlock>(parsedBlocks.size)
+    val translatedContextMap = HashMap<Int, SrtBlock>(parsedBlocks.size)
+    var nextStartIdx = 0
+    var segmentIdx = 1
+    var segmentsProcessed = 0
+
+    while (nextStartIdx < parsedBlocks.size) {
       currentCoroutineContext().ensureActive()
+      val batchSize = (dynamicSizer?.currentBatchSize ?: baseChunkSize).coerceAtLeast(1)
+      val remainingBlocks = parsedBlocks.size - nextStartIdx
+      val estimatedTotal =
+        segmentIdx - 1 + ((remainingBlocks + batchSize - 1) / batchSize).coerceAtLeast(1)
+      val segment =
+        buildDynamicSlice(
+          allBlocks = parsedBlocks,
+          startIdx = nextStartIdx,
+          batchSize = batchSize,
+          segmentIndex = segmentIdx,
+          estimatedTotalSegments = estimatedTotal,
+          contextLines = settings.effectiveContextLines,
+          translatedByIndex = translatedContextMap,
+        )
+
       val outcome =
         translateSegmentWithRotation(
           session = session,
@@ -474,9 +530,9 @@ class SubtitleTranslationService(
           inputMode = inputMode,
           title = title,
           secondaryMeta = secondaryMeta,
-          fileName = plan.fileName,
+          fileName = fileName,
           workId = workId,
-          allBlocks = plan.parsedBlocks,
+          allBlocks = parsedBlocks,
           translatedByIndex = translatedContextMap,
           onStatusLog = onStatusLog,
           onRetryDelay = onRetryDelay,
@@ -487,7 +543,14 @@ class SubtitleTranslationService(
         is RotationExecutionResult.Success -> {
           accumulated.addAll(outcome.value)
           outcome.value.forEach { translatedContextMap[it.index] = it }
+          dynamicSizer?.recordSuccessLatency(
+            latencyMs = outcome.latencyMs,
+            rateLimitHitsInBatch = outcome.rateLimitHitsInBatch,
+          )
           onSegmentCompleted(segment, outcome.value)
+          nextStartIdx = segment.endBlockIndexExclusive
+          segmentIdx++
+          segmentsProcessed++
         }
         is RotationExecutionResult.Failure -> {
           return SubtitleTranslationServiceResult.Failure(
@@ -500,17 +563,17 @@ class SubtitleTranslationService(
 
     val reconstructed =
       SrtParser.reconstructFromBlocks(
-        originalBlocks = plan.parsedBlocks,
+        originalBlocks = parsedBlocks,
         translatedBlocks = accumulated,
         strictTimecodeCheck = true,
       )
 
     return SubtitleTranslationServiceResult.Success(
-      fileName = plan.fileName,
-      originalBlocks = plan.parsedBlocks,
+      fileName = fileName,
+      originalBlocks = parsedBlocks,
       translatedBlocks = accumulated,
       reconstructedBengaliSrt = reconstructed,
-      segmentsProcessed = plan.segments.size,
+      segmentsProcessed = segmentsProcessed,
     )
   }
 }

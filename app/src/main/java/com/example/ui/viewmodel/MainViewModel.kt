@@ -6,6 +6,8 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BSubApplication
+import com.example.data.local.ApiKeyUsageStat
+import com.example.data.local.ApiUsageEvent
 import com.example.data.local.FileTranslationProgress
 import com.example.data.local.RoomTranslationProgress
 import com.example.data.local.SubtitleTranslation
@@ -94,6 +96,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val keyStorage = app.secureKeyStorage
   private val historyRepo = app.historyRepository
   private val subtitleTranslationRepo = app.subtitleTranslationRepository
+  private val apiUsageRepo = app.apiUsageRepository
   private val fileStorage = app.subtitleFileStorage
   private val coordinator = app.translationCoordinator
 
@@ -152,6 +155,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList(),
       )
+
+  val apiKeyUsageStats: StateFlow<List<ApiKeyUsageStat>> =
+    apiUsageRepo.allKeyStats.stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.WhileSubscribed(5000),
+      initialValue = emptyList(),
+    )
+
+  val recentApiUsageEvents: StateFlow<List<ApiUsageEvent>> =
+    apiUsageRepo.recentEvents.stateIn(
+      scope = viewModelScope,
+      started = SharingStarted.WhileSubscribed(5000),
+      initialValue = emptyList(),
+    )
 
   private val _studioForm = MutableStateFlow(StudioFormState())
   val studioForm: StateFlow<StudioFormState> = _studioForm.asStateFlow()
@@ -529,6 +546,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun setApiProvider(provider: ApiProvider) {
     viewModelScope.launch { settingsRepo.setApiProvider(provider) }
+  }
+
+  fun setDynamicBatchSizing(enabled: Boolean) {
+    viewModelScope.launch { settingsRepo.setDynamicBatchSizing(enabled) }
+  }
+
+  fun clearApiUsageStats(provider: ApiProvider? = null) {
+    viewModelScope.launch {
+      apiUsageRepo.clearStats(provider)
+      val scopeLabel = provider?.displayName ?: "All providers"
+      _uiMessages.emit("Cleared API usage statistics ($scopeLabel).")
+    }
   }
 
   // --- History & Export ---
