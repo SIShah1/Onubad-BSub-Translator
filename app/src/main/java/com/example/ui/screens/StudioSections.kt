@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -22,36 +21,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteSweep
-import androidx.compose.material.icons.rounded.ExpandLess
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Preview
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Terminal
-import androidx.compose.material.icons.rounded.UploadFile
-import androidx.compose.material.icons.rounded.VpnKey
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.WorkHistory
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,9 +51,6 @@ import androidx.compose.ui.unit.dp
 import androidx.work.WorkInfo
 import com.example.data.local.FileTranslationProgress
 import com.example.data.local.RoomTranslationProgress
-import com.example.data.preferences.SecureKeyStorage
-import com.example.domain.model.ApiKeyEntry
-import com.example.domain.model.ApiKeyStatus
 import com.example.domain.model.LogLevel
 import com.example.domain.model.ProcessingLogEntry
 import com.example.domain.model.SelectedSubtitleFile
@@ -74,7 +59,6 @@ import com.example.domain.model.TranslationStatus
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionCard
-import com.example.ui.theme.BSubShape
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalThemeController
 import java.util.Locale
@@ -234,162 +218,6 @@ internal fun FileStatusBadge(
     contentColor = contentColor,
     modifier = modifier.semantics(mergeDescendants = true) {},
   )
-}
-
-@Composable
-internal fun StudioBulkKeyImportCard(
-  apiKeys: List<ApiKeyEntry>,
-  isRunning: Boolean,
-  onImportBulkKeys: (String) -> Unit,
-  onLaunchKeyFilePicker: () -> Unit,
-  onNavigateToKeys: () -> Unit,
-) {
-  var bulkInput by rememberSaveable { mutableStateOf("") }
-  var isExpanded by rememberSaveable { mutableStateOf(false) }
-  val showEditor = isExpanded || apiKeys.isEmpty()
-  val detectedCount = remember(bulkInput) { SecureKeyStorage.parseBulkKeys(bulkInput).size }
-  val activeKeysCount = apiKeys.count { it.status == ApiKeyStatus.ACTIVE }
-
-  StudioSectionCard(
-    modifier = Modifier.testTag("studio_bulk_keys_card"),
-  ) {
-    SectionTitleRow(
-      title = "Gemini API Key Pool",
-      subtitle =
-        if (apiKeys.isEmpty()) "No keys saved — paste keys or import a .txt file"
-        else "$activeKeysCount active / ${apiKeys.size} total keys for rotation",
-      icon = Icons.Rounded.VpnKey,
-      trailing = {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          TextButton(
-            onClick = onNavigateToKeys,
-            modifier = Modifier.testTag("studio_manage_keys_button"),
-          ) {
-            Text("Manage")
-          }
-          if (apiKeys.isNotEmpty()) {
-            IconButton(
-              onClick = { isExpanded = !isExpanded },
-              modifier =
-                Modifier.minimumInteractiveComponentSize()
-                  .testTag("studio_toggle_bulk_import_button"),
-            ) {
-              Icon(
-                imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                contentDescription = if (isExpanded) "Collapse bulk import" else "Expand bulk import",
-              )
-            }
-          }
-        }
-      },
-    )
-
-    if (apiKeys.isEmpty()) {
-      Spacer(modifier = Modifier.height(10.dp))
-      Surface(
-        modifier =
-          Modifier.fillMaxWidth()
-            .clickable(onClick = onNavigateToKeys)
-            .testTag("missing_keys_banner"),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
-      ) {
-        Row(
-          modifier = Modifier.padding(12.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Icon(
-            imageVector = Icons.Rounded.WarningAmber,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.error,
-          )
-          Spacer(modifier = Modifier.width(10.dp))
-          Column(modifier = Modifier.weight(1f)) {
-            Text(
-              text = "No Gemini API Keys Saved",
-              style = MaterialTheme.typography.titleSmall,
-              color = MaterialTheme.colorScheme.onErrorContainer,
-            )
-            Text(
-              text = "Import keys below or tap to open full Key Manager.",
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
-            )
-          }
-        }
-      }
-    }
-
-    AnimatedVisibility(visible = showEditor) {
-      Column(modifier = Modifier.fillMaxWidth()) {
-        Spacer(modifier = Modifier.height(12.dp))
-
-        OutlinedTextField(
-          value = bulkInput,
-          onValueChange = { bulkInput = it },
-          label = { Text("Paste Multiple Gemini API Keys") },
-          placeholder = { Text("AIzaSy...\nAIzaSy...\n(Newlines, commas, or key=value)") },
-          minLines = 3,
-          maxLines = 6,
-          enabled = !isRunning,
-          textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-          modifier = Modifier.fillMaxWidth().testTag("studio_bulk_keys_input"),
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Text(
-          text =
-            if (detectedCount > 0) "$detectedCount key(s) detected for multi-key rotation"
-            else "Paste keys manually or import a .txt key file",
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          modifier = Modifier.testTag("studio_bulk_keys_detected_count"),
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        Row(
-          modifier = Modifier.fillMaxWidth(),
-          horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-          OutlinedButton(
-            onClick = onLaunchKeyFilePicker,
-            enabled = !isRunning,
-            shape = BSubShape.petalButton,
-            modifier =
-              Modifier.weight(1f)
-                .minimumInteractiveComponentSize()
-                .testTag("studio_import_keys_file_button"),
-          ) {
-            Icon(
-              imageVector = Icons.Rounded.UploadFile,
-              contentDescription = null,
-              modifier = Modifier.size(18.dp),
-            )
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("Import .txt", maxLines = 1, overflow = TextOverflow.Ellipsis)
-          }
-
-          Button(
-            onClick = {
-              onImportBulkKeys(bulkInput)
-              bulkInput = ""
-            },
-            enabled = detectedCount > 0 && !isRunning,
-            shape = BSubShape.petalButton,
-            modifier =
-              Modifier.weight(1f)
-                .minimumInteractiveComponentSize()
-                .testTag("studio_save_bulk_keys_button"),
-          ) {
-            Text("Save Keys", maxLines = 1, overflow = TextOverflow.Ellipsis)
-          }
-        }
-      }
-    }
-  }
 }
 
 @Composable

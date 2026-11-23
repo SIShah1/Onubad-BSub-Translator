@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import java.security.KeyStore
 import java.util.UUID
 import javax.crypto.Cipher
@@ -28,6 +29,15 @@ class SecureKeyStorage(private val context: Context) {
 
   private val encryptedKeysPref = stringPreferencesKey("encrypted_api_keys_payload")
   private val activeKeyIndexPref = intPreferencesKey("active_rotation_key_index")
+  private val activeGrokIndexPref = intPreferencesKey("active_rotation_key_index_grok")
+  private val activeDeepSeekIndexPref = intPreferencesKey("active_rotation_key_index_deepseek")
+
+  private fun activeIndexPrefFor(provider: ApiProvider) =
+    when (provider) {
+      ApiProvider.GEMINI -> activeKeyIndexPref
+      ApiProvider.GROK -> activeGrokIndexPref
+      ApiProvider.DEEPSEEK -> activeDeepSeekIndexPref
+    }
 
   val apiKeysFlow: Flow<List<ApiKeyEntry>> =
     context.secureKeysDataStore.data.map { prefs ->
@@ -44,33 +54,47 @@ class SecureKeyStorage(private val context: Context) {
     return apiKeysFlow.first()
   }
 
-  suspend fun getActiveKeyIndex(): Int {
-    return activeKeyIndexFlow.first()
+  suspend fun getKeysSnapshot(provider: ApiProvider): List<ApiKeyEntry> {
+    return apiKeysFlow.first().filter { it.provider == provider }
   }
 
-  suspend fun setActiveKeyIndex(index: Int) {
+  suspend fun getActiveKeyIndex(provider: ApiProvider = ApiProvider.GEMINI): Int {
+    val pref = activeIndexPrefFor(provider)
+    return context.secureKeysDataStore.data.map { prefs ->
+      (prefs[pref] ?: 0).coerceAtLeast(0)
+    }.first()
+  }
+
+  suspend fun setActiveKeyIndex(index: Int, provider: ApiProvider = ApiProvider.GEMINI) {
+    val pref = activeIndexPrefFor(provider)
     context.secureKeysDataStore.edit { prefs ->
-      prefs[activeKeyIndexPref] = index.coerceAtLeast(0)
+      prefs[pref] = index.coerceAtLeast(0)
     }
   }
 
-  suspend fun addBulkKeys(rawInput: String): Int {
+  suspend fun addBulkKeys(
+    rawInput: String,
+    provider: ApiProvider = ApiProvider.GEMINI,
+  ): Int {
     val parsedKeys = parseBulkKeys(rawInput)
     if (parsedKeys.isEmpty()) return 0
 
     var addedCount = 0
     updateKeys { existing ->
-      val existingValues = existing.map { it.key }.toHashSet()
+      val existingValuesForProvider =
+        existing.filter { it.provider == provider }.map { it.key }.toHashSet()
       val mutable = existing.toMutableList()
+      var providerCount = existing.count { it.provider == provider }
       for (keyVal in parsedKeys) {
-        if (existingValues.add(keyVal)) {
-          val number = mutable.size + 1
+        if (existingValuesForProvider.add(keyVal)) {
+          providerCount++
           mutable.add(
             ApiKeyEntry(
               id = UUID.randomUUID().toString(),
               key = keyVal,
-              label = "Key #$number",
+              label = "Key #$providerCount",
               status = ApiKeyStatus.ACTIVE,
+              provider = provider,
             )
           )
           addedCount++
@@ -81,20 +105,26 @@ class SecureKeyStorage(private val context: Context) {
     return addedCount
   }
 
-  suspend fun addSingleKey(keyValue: String, label: String) {
+  suspend fun addSingleKey(
+    keyValue: String,
+    label: String,
+    provider: ApiProvider = ApiProvider.GEMINI,
+  ) {
     val trimmed = keyValue.trim()
     if (trimmed.isBlank()) return
     updateKeys { existing ->
-      if (existing.any { it.key == trimmed }) {
+      if (existing.any { it.provider == provider && it.key == trimmed }) {
         existing
       } else {
-        val resolvedLabel = label.trim().ifBlank { "Key #${existing.size + 1}" }
+        val countForProvider = existing.count { it.provider == provider }
+        val resolvedLabel = label.trim().ifBlank { "Key #${countForProvider + 1}" }
         existing +
           ApiKeyEntry(
             id = UUID.randomUUID().toString(),
             key = trimmed,
             label = resolvedLabel,
             status = ApiKeyStatus.ACTIVE,
+            provider = provider,
           )
       }
     }
@@ -123,10 +153,17 @@ class SecureKeyStorage(private val context: Context) {
     updateKeys { existing -> existing.filterNot { it.id == id } }
   }
 
-  suspend fun clearAllKeys() {
-    context.secureKeysDataStore.edit { prefs ->
-      prefs[encryptedKeysPref] = encodeEncryptedPayload(emptyList())
-      prefs[activeKeyIndexPref] = 0
+  suspend fun clearAllKeys(provider: ApiProvider? = null) {
+    if (provider == null) {
+      context.secureKeysDataStore.edit { prefs ->
+        prefs[encryptedKeysPref] = encodeEncryptedPayload(emptyList())
+        prefs[activeKeyIndexPref] = 0
+        prefs[activeGrokIndexPref] = 0
+        prefs[activeDeepSeekIndexPref] = 0
+      }
+    } else {
+      updateKeys { existing -> existing.filterNot { it.provider == provider } }
+      setActiveKeyIndex(0, provider)
     }
   }
 
@@ -138,10 +175,13 @@ class SecureKeyStorage(private val context: Context) {
     }
   }
 
-  suspend fun resetExhaustedAndCooldownKeys() {
+  suspend fun resetExhaustedAndCooldownKeys(provider: ApiProvider? = null) {
     updateKeys { existing ->
       existing.map { entry ->
-        if (entry.status == ApiKeyStatus.QUOTA_EXHAUSTED || entry.status == ApiKeyStatus.COOLDOWN) {
+        if (
+          (provider == null || entry.provider == provider) &&
+            (entry.status == ApiKeyStatus.QUOTA_EXHAUSTED || entry.status == ApiKeyStatus.COOLDOWN)
+        ) {
           entry.copy(status = ApiKeyStatus.ACTIVE, lastError = null)
         } else {
           entry
@@ -150,9 +190,15 @@ class SecureKeyStorage(private val context: Context) {
     }
   }
 
-  suspend fun resetAllKeyStatuses() {
+  suspend fun resetAllKeyStatuses(provider: ApiProvider? = null) {
     updateKeys { existing ->
-      existing.map { it.copy(status = ApiKeyStatus.ACTIVE, lastError = null) }
+      existing.map { entry ->
+        if (provider == null || entry.provider == provider) {
+          entry.copy(status = ApiKeyStatus.ACTIVE, lastError = null)
+        } else {
+          entry
+        }
+      }
     }
   }
 
@@ -162,11 +208,13 @@ class SecureKeyStorage(private val context: Context) {
         prefs[encryptedKeysPref]?.let { decodeEncryptedPayload(it) } ?: emptyList()
       val updated = transform(current)
       prefs[encryptedKeysPref] = encodeEncryptedPayload(updated)
-      val currentIdx = prefs[activeKeyIndexPref] ?: 0
-      if (updated.isEmpty()) {
-        prefs[activeKeyIndexPref] = 0
-      } else if (currentIdx >= updated.size || currentIdx < 0) {
-        prefs[activeKeyIndexPref] = 0
+      for (provider in ApiProvider.entries) {
+        val pref = activeIndexPrefFor(provider)
+        val providerCount = updated.count { it.provider == provider }
+        val currentIdx = prefs[pref] ?: 0
+        if (providerCount == 0 || currentIdx >= providerCount || currentIdx < 0) {
+          prefs[pref] = 0
+        }
       }
     }
   }
@@ -181,6 +229,7 @@ class SecureKeyStorage(private val context: Context) {
           put("label", entry.label)
           put("status", entry.status.name)
           put("lastError", entry.lastError ?: "")
+          put("provider", entry.provider.name)
         }
       jsonArray.put(obj)
     }
@@ -197,6 +246,9 @@ class SecureKeyStorage(private val context: Context) {
         val obj = jsonArray.getJSONObject(i)
         val statusName = obj.optString("status", ApiKeyStatus.ACTIVE.name)
         val status = runCatching { ApiKeyStatus.valueOf(statusName) }.getOrDefault(ApiKeyStatus.ACTIVE)
+        val providerName = obj.optString("provider", ApiProvider.GEMINI.name)
+        val provider =
+          runCatching { ApiProvider.valueOf(providerName) }.getOrDefault(ApiProvider.GEMINI)
         val lastErr = obj.optString("lastError", "").ifBlank { null }
         result.add(
           ApiKeyEntry(
@@ -205,6 +257,7 @@ class SecureKeyStorage(private val context: Context) {
             label = obj.optString("label", "Key #${i + 1}"),
             status = status,
             lastError = lastErr,
+            provider = provider,
           )
         )
       }

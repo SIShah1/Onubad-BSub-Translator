@@ -61,6 +61,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DefaultConfig
 import com.example.domain.model.FewShotExample
@@ -528,14 +529,65 @@ private fun AdvancedSettingsCard(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Spacer(modifier = Modifier.height(12.dp))
 
-    // 2. Gemini Model
+    // 2. API Provider & Model
+    Text(
+      text = "AI Provider",
+      style = MaterialTheme.typography.titleSmall,
+      color = MaterialTheme.colorScheme.onSurface,
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+    val providerSegmentedColors =
+      SegmentedButtonDefaults.colors(
+        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        inactiveContainerColor = MaterialTheme.colorScheme.surface,
+        inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        activeBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        inactiveBorderColor = MaterialTheme.colorScheme.outlineVariant,
+      )
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+      ApiProvider.entries.forEachIndexed { index, provider ->
+        SegmentedButton(
+          selected = settings.apiProvider == provider,
+          onClick = { viewModel.setApiProvider(provider) },
+          shape = SegmentedButtonDefaults.itemShape(index = index, count = ApiProvider.entries.size),
+          colors = providerSegmentedColors,
+          modifier = Modifier.testTag("settings_provider_${provider.name.lowercase()}"),
+        ) {
+          Text(provider.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+      }
+    }
+
+    Spacer(modifier = Modifier.height(12.dp))
+
+    val defaultModelForProvider = DefaultConfig.defaultModelFor(settings.apiProvider)
+    val presetModelsForProvider = DefaultConfig.presetModelsFor(settings.apiProvider)
+
     ParamModeHeader(
-      title = "Gemini Model",
-      defaultSummary = DefaultConfig.GEMINI_MODEL,
+      title = "AI Model (${settings.apiProvider.displayName})",
+      defaultSummary = defaultModelForProvider,
       mode = settings.modelMode,
       onModeSelected = { mode -> viewModel.setModel(mode, modelInput) },
     )
     if (settings.modelMode == ParamMode.MANUAL) {
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        presetModelsForProvider.forEach { preset ->
+          FilterChip(
+            selected = settings.manualModel == preset,
+            onClick = {
+              modelInput = preset
+              viewModel.setModel(ParamMode.MANUAL, preset)
+            },
+            label = { Text(preset) },
+            modifier = Modifier.testTag("preset_model_chip_$preset"),
+          )
+        }
+      }
+      Spacer(modifier = Modifier.height(6.dp))
       OutlinedTextField(
         value = modelInput,
         onValueChange = {
@@ -543,7 +595,7 @@ private fun AdvancedSettingsCard(
           viewModel.setModel(ParamMode.MANUAL, it)
         },
         label = { Text("Model ID") },
-        placeholder = { Text(DefaultConfig.GEMINI_MODEL) },
+        placeholder = { Text(defaultModelForProvider) },
         singleLine = true,
         modifier = Modifier.fillMaxWidth().testTag("manual_model_input"),
       )

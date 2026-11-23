@@ -9,6 +9,7 @@ import com.example.data.local.SubtitleTranslationRepository
 import com.example.data.network.ApiKeyRotationManager
 import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiApiService
+import com.example.data.network.OpenAiCompatibleApiService
 import com.example.data.preferences.SecureKeyStorage
 import com.example.data.preferences.SettingsRepository
 import com.example.data.storage.SubtitleFileStorage
@@ -75,9 +76,23 @@ class BSubApplication : Application() {
 
   @VisibleForTesting
   internal fun overrideGeminiServiceForTesting(customService: GeminiApiService?) {
+    overrideServicesForTesting(customService = customService, customChatService = null)
+  }
+
+  @VisibleForTesting
+  internal fun overrideServicesForTesting(
+    customService: GeminiApiService? = null,
+    customChatService: OpenAiCompatibleApiService? = null,
+  ) {
     coordinatorOverride =
-      customService?.let { service ->
-        val customClient = GeminiApiClient(customService = service)
+      if (customService == null && customChatService == null) {
+        null
+      } else {
+        val customClient =
+          GeminiApiClient(
+            customService = customService,
+            customChatService = customChatService,
+          )
         val customRotationManager =
           ApiKeyRotationManager(
             keyStorage = secureKeyStorage,

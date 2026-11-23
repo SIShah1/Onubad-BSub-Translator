@@ -49,6 +49,10 @@ import com.example.data.local.SubtitleTranslationStatus
 import com.example.data.local.TranslationHistoryEntity
 import com.example.ui.screens.HistoryScreen
 import com.example.data.network.ApiKeyRotationManager
+import com.example.data.network.ChatChoiceDto
+import com.example.data.network.ChatCompletionRequest
+import com.example.data.network.ChatCompletionResponse
+import com.example.data.network.ChatMessageDto
 import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiApiService
 import com.example.data.network.GeminiCallResult
@@ -58,9 +62,12 @@ import com.example.data.network.GeminiGenerateContentRequest
 import com.example.data.network.GeminiGenerateContentResponse
 import com.example.data.network.GeminiKeyRotationInterceptor
 import com.example.data.network.GeminiPart
+import com.example.data.network.OpenAiCompatibleApiService
 import com.example.data.network.RotationExecutionResult
 import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
+import com.example.domain.model.DefaultConfig
 import com.example.domain.model.InputMode
 import com.example.domain.model.ParamMode
 import com.example.domain.model.SelectedSubtitleFile
@@ -74,6 +81,7 @@ import com.example.logging.WorkManagerDiagnosticTree
 import com.example.service.SubtitleTranslationService
 import com.example.service.SubtitleTranslationServiceResult
 import com.example.ui.components.ContextAwareTranslationCard
+import com.example.ui.screens.ApiKeysScreen
 import com.example.ui.screens.StudioScreen
 import com.example.ui.screens.SubtitlePreviewScreen
 import com.example.ui.screens.fitHeroTitleFontSizeSp
@@ -129,11 +137,19 @@ class ExampleRobolectricTest {
     app = context as BSubApplication
     db = Room.inMemoryDatabaseBuilder(context, BSubDatabase::class.java).allowMainThreadQueries().build()
     WorkManagerTestInitHelper.initializeTestWorkManager(context)
+    runBlocking {
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+      app.settingsRepository.setModel(ParamMode.DEFAULT, DefaultConfig.GEMINI_MODEL)
+    }
   }
 
   @After
   fun tearDown() {
     app.overrideGeminiServiceForTesting(null)
+    runBlocking {
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+      app.settingsRepository.setModel(ParamMode.DEFAULT, DefaultConfig.GEMINI_MODEL)
+    }
     TranslationLogger.resetForTesting(app)
     db.close()
   }
@@ -1538,9 +1554,9 @@ class ExampleRobolectricTest {
     composeTestRule.onNodeWithTag("file_status_indicator_2").performScrollTo().assertIsDisplayed()
     composeTestRule.onNodeWithTag("file_status_badge_2").assertTextEquals("Pending")
 
-    // 3. Bulk key import card in StudioScreen
-    composeTestRule.onNodeWithTag("studio_bulk_keys_card").performScrollTo().assertIsDisplayed()
-    composeTestRule.onNodeWithTag("studio_import_keys_file_button").performScrollTo().assertIsDisplayed()
+    // 3. Gemini API Key Pool card is removed from StudioScreen (lives in Keys tab)
+    composeTestRule.onNodeWithTag("studio_bulk_keys_card").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("studio_import_keys_file_button").assertDoesNotExist()
 
     // 4. Multi-file WorkManager progress dashboard
     composeTestRule.onNodeWithTag("workmanager_file_dashboard").performScrollTo().assertIsDisplayed()
@@ -1551,41 +1567,35 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `studio screen manual bulk key input and file storage read helpers work for multi-key rotation`() =
+  fun `api keys screen bulk key input and file storage read helpers work for multi-key rotation`() =
     runBlocking {
       var capturedBulk = ""
+      var capturedProvider: ApiProvider? = null
       composeTestRule.setContent {
         BSubTranslatorTheme {
-          StudioScreen(
-            formState = StudioFormState(),
-            settings = AppSettings(),
+          ApiKeysScreen(
             apiKeys = emptyList(),
-            sessionState = TranslationSessionState(status = TranslationStatus.IDLE),
-            onInputModeChange = {},
-            onMovieNameChange = {},
-            onReleaseYearChange = {},
-            onSeriesNameChange = {},
-            onSeasonChange = {},
-            onSingleSrtPicked = {},
-            onMultipleSrtPicked = {},
-            onRemoveFile = {},
-            onMoveSeriesFile = { _, _ -> },
-            onClearFiles = {},
-            onStartTranslation = {},
-            onAbortTranslation = {},
-            onClearLogs = {},
-            onImportBulkKeys = { capturedBulk = it },
-            onImportKeysFile = {},
-            onNavigateToKeys = {},
+            isTranslationRunning = false,
+            onSaveBulkKeys = { raw, provider ->
+              capturedBulk = raw
+              capturedProvider = provider
+            },
+            onAddSingleKey = { _, _, _ -> },
+            onEditKey = { _, _, _ -> },
+            onRemoveKey = {},
+            onClearAllKeys = {},
+            onResetAllStatuses = {},
           )
         }
       }
 
       val keyInput = "GEMINI_1=AIzaSyBulkAlphaKey123456\nAIzaSyBulkBravoKey123456"
-      composeTestRule.onNodeWithTag("studio_bulk_keys_input").performScrollTo().performTextInput(keyInput)
-      composeTestRule.onNodeWithTag("studio_bulk_keys_detected_count").assertTextContains("2 key(s) detected", substring = true)
-      composeTestRule.onNodeWithTag("studio_save_bulk_keys_button").performScrollTo().performClick()
+      composeTestRule.onNodeWithTag("import_keys_file_button").performScrollTo().assertIsDisplayed()
+      composeTestRule.onNodeWithTag("bulk_keys_input").performScrollTo().performTextInput(keyInput)
+      composeTestRule.onNodeWithTag("bulk_keys_detected_count").assertTextContains("2 key(s) detected", substring = true)
+      composeTestRule.onNodeWithTag("save_bulk_keys_button").performScrollTo().performClick()
       assertEquals(keyInput, capturedBulk)
+      assertEquals(ApiProvider.GEMINI, capturedProvider)
 
       // 2 & 5. File storage URI read + SrtFileParser class structured parsing from text file
       val tempSrt = java.io.File(app.cacheDir, "picker_sample.srt")
@@ -2535,5 +2545,196 @@ class ExampleRobolectricTest {
       assertEquals(2, capturedRequests.size)
       assertEquals(1, capturedRequests[0].contents.size)
       assertEquals(1, capturedRequests[1].contents.size)
+    }
+
+  @Test
+  fun `api keys screen separates gemini grok and deepseek segments and switches active provider`() {
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+    }
+
+    composeTestRule.setContent {
+      val keys by app.secureKeyStorage.apiKeysFlow.collectAsState(initial = emptyList())
+      val currentSettings by
+        app.settingsRepository.settingsFlow.collectAsState(initial = AppSettings())
+      val scope = androidx.compose.runtime.rememberCoroutineScope()
+      BSubTranslatorTheme {
+        ApiKeysScreen(
+          apiKeys = keys,
+          isTranslationRunning = false,
+          activeProvider = currentSettings.apiProvider,
+          onSetActiveProvider = { provider ->
+            scope.launch { app.settingsRepository.setApiProvider(provider) }
+          },
+          onSaveBulkKeys = { raw, provider ->
+            scope.launch { app.secureKeyStorage.addBulkKeys(raw, provider) }
+          },
+          onAddSingleKey = { k, l, provider ->
+            scope.launch { app.secureKeyStorage.addSingleKey(k, l, provider) }
+          },
+          onEditKey = { id, k, l ->
+            scope.launch { app.secureKeyStorage.editKey(id, k, l) }
+          },
+          onRemoveKey = { id ->
+            scope.launch { app.secureKeyStorage.removeKey(id) }
+          },
+          onClearAllKeys = { provider ->
+            scope.launch { app.secureKeyStorage.clearAllKeys(provider) }
+          },
+          onResetAllStatuses = { provider ->
+            scope.launch { app.secureKeyStorage.resetAllKeyStatuses(provider) }
+          },
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("provider_segment_gemini").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("provider_segment_grok").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("provider_segment_deepseek").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("active_provider_badge").assertIsDisplayed()
+
+    // Switch to Grok segment, save a Grok key, and activate Grok
+    composeTestRule.onNodeWithTag("provider_segment_grok").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("activate_provider_button").performScrollTo().assertIsDisplayed().performClick()
+    composeTestRule.onNodeWithTag("bulk_keys_input").performScrollTo().performTextInput("xai-test-grok-key-1234567890")
+    composeTestRule.onNodeWithTag("save_bulk_keys_button").performScrollTo().performClick()
+
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("active_provider_badge").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("provider_segment_grok").assertTextContains("Grok (1)", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    // Switch to DeepSeek segment and save a DeepSeek key
+    composeTestRule.onNodeWithTag("provider_segment_deepseek").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("bulk_keys_input").performScrollTo().performTextReplacement("sk-deepseek-key-1234567890")
+    composeTestRule.onNodeWithTag("save_bulk_keys_button").performScrollTo().performClick()
+
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("provider_segment_deepseek").assertTextContains("DeepSeek (1)", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    runBlocking {
+      assertEquals(0, app.secureKeyStorage.getKeysSnapshot(ApiProvider.GEMINI).size)
+      assertEquals(1, app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).size)
+      assertEquals(1, app.secureKeyStorage.getKeysSnapshot(ApiProvider.DEEPSEEK).size)
+    }
+    assertEquals(DefaultConfig.DEEPSEEK_MODEL, DefaultConfig.defaultModelFor(ApiProvider.DEEPSEEK))
+  }
+
+  @Test
+  fun `translation service executes grok and deepseek endpoints with per-provider key rotation`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("xai-grok-alpha-key-123456", "Grok 1", ApiProvider.GROK)
+      app.secureKeyStorage.addSingleKey("sk-ds-exhausted-key-123456", "DS 1", ApiProvider.DEEPSEEK)
+      app.secureKeyStorage.addSingleKey("sk-ds-healthy-key-1234567", "DS 2", ApiProvider.DEEPSEEK)
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 5)
+      app.settingsRepository.setModel(ParamMode.DEFAULT, "")
+      app.settingsRepository.setContextLines(ParamMode.MANUAL, 0)
+
+      val capturedUrls = mutableListOf<String>()
+      val capturedAuths = mutableListOf<String>()
+      val capturedModels = mutableListOf<String>()
+
+      val fakeChatService =
+        object : OpenAiCompatibleApiService {
+          override suspend fun createChatCompletion(
+            url: String,
+            authorization: String,
+            request: ChatCompletionRequest,
+          ): Response<ChatCompletionResponse> {
+            capturedUrls.add(url)
+            capturedAuths.add(authorization)
+            capturedModels.add(request.model)
+            if (authorization == "Bearer sk-ds-exhausted-key-123456") {
+              return Response.error(
+                402,
+                """{"error":{"message":"Insufficient Balance","type":"invalid_request_error"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+            val userMsg = request.messages.last().content
+            val blocks = com.example.srt.SrtParser.parseBlocks(userMsg)
+            val reply =
+              blocks.joinToString("\n\n") { b ->
+                "${b.index}\n${b.timestamp}\nবাংলা ${b.index}"
+              }
+            return Response.success(
+              ChatCompletionResponse(
+                choices =
+                  listOf(
+                    ChatChoiceDto(
+                      message = ChatMessageDto(role = "assistant", content = reply),
+                      finishReason = "stop",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customChatService = fakeChatService)
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val sampleSrt = "1\n00:00:01,000 --> 00:00:03,000\nHello world."
+
+      // 1. Run with Grok
+      app.settingsRepository.setApiProvider(ApiProvider.GROK)
+      val grokResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = sampleSrt,
+          fileName = "grok.srt",
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue(grokResult is SubtitleTranslationServiceResult.Success)
+      assertEquals(listOf(OpenAiCompatibleApiService.GROK_URL), capturedUrls)
+      assertEquals(listOf("Bearer xai-grok-alpha-key-123456"), capturedAuths)
+      assertEquals(listOf(DefaultConfig.GROK_MODEL), capturedModels)
+
+      // 2. Run with DeepSeek (rotates past 402 Insufficient Balance on DS 1 -> succeeds on DS 2)
+      capturedUrls.clear()
+      capturedAuths.clear()
+      capturedModels.clear()
+      app.settingsRepository.setApiProvider(ApiProvider.DEEPSEEK)
+      val dsResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = sampleSrt,
+          fileName = "deepseek.srt",
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue(dsResult is SubtitleTranslationServiceResult.Success)
+      assertEquals(
+        listOf(OpenAiCompatibleApiService.DEEPSEEK_URL, OpenAiCompatibleApiService.DEEPSEEK_URL),
+        capturedUrls,
+      )
+      assertEquals(
+        listOf("Bearer sk-ds-exhausted-key-123456", "Bearer sk-ds-healthy-key-1234567"),
+        capturedAuths,
+      )
+      assertEquals(
+        listOf(DefaultConfig.DEEPSEEK_MODEL, DefaultConfig.DEEPSEEK_MODEL),
+        capturedModels,
+      )
     }
 }

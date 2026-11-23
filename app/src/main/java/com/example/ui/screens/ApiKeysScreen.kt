@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,12 +21,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VpnKey
@@ -36,11 +41,15 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,8 +61,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.preferences.SecureKeyStorage
+import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionCard
@@ -65,29 +76,46 @@ import com.example.ui.theme.JetBrainsMonoFamily
 fun ApiKeysScreen(
   apiKeys: List<ApiKeyEntry>,
   isTranslationRunning: Boolean,
-  onSaveBulkKeys: (String) -> Unit,
-  onAddSingleKey: (String, String) -> Unit,
+  activeProvider: ApiProvider = ApiProvider.GEMINI,
+  onSetActiveProvider: (ApiProvider) -> Unit = {},
+  onSaveBulkKeys: (String, ApiProvider) -> Unit,
+  onImportKeysFile: (Uri?, ApiProvider) -> Unit = { _, _ -> },
+  onAddSingleKey: (String, String, ApiProvider) -> Unit,
   onEditKey: (String, String, String) -> Unit,
   onRemoveKey: (String) -> Unit,
-  onClearAllKeys: () -> Unit,
-  onResetAllStatuses: () -> Unit,
+  onClearAllKeys: (ApiProvider) -> Unit,
+  onResetAllStatuses: (ApiProvider) -> Unit,
   modifier: Modifier = Modifier,
 ) {
+  var selectedProvider by rememberSaveable { mutableStateOf(activeProvider) }
   var bulkInput by rememberSaveable { mutableStateOf("") }
   var editingKey by remember { mutableStateOf<ApiKeyEntry?>(null) }
   var showAddSingleDialog by remember { mutableStateOf(false) }
   var showClearAllConfirm by remember { mutableStateOf(false) }
 
+  LaunchedEffect(activeProvider) {
+    selectedProvider = activeProvider
+  }
+
+  val keyFileLauncher =
+    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+      onImportKeysFile(uri, selectedProvider)
+    }
+
+  val providerKeys =
+    remember(apiKeys, selectedProvider) {
+      apiKeys.filter { it.provider == selectedProvider }
+    }
   val detectedBulkCount = remember(bulkInput) { SecureKeyStorage.parseBulkKeys(bulkInput).size }
-  val activeCount = apiKeys.count { it.status == ApiKeyStatus.ACTIVE }
-  val exhaustedCount = apiKeys.count { it.status == ApiKeyStatus.QUOTA_EXHAUSTED }
-  val invalidCount = apiKeys.count { it.status == ApiKeyStatus.INVALID }
+  val activeCount = providerKeys.count { it.status == ApiKeyStatus.ACTIVE }
+  val exhaustedCount = providerKeys.count { it.status == ApiKeyStatus.QUOTA_EXHAUSTED }
+  val invalidCount = providerKeys.count { it.status == ApiKeyStatus.INVALID }
 
   Column(
     modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
-    // 1. Key Pool Overview
+    // 1. Provider Segments & Key Pool Overview
     StudioSectionCard {
       SectionTitleRow(
         title = "API Key Manager",
@@ -102,7 +130,7 @@ fun ApiKeysScreen(
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
               ),
-            modifier = Modifier.testTag("add_single_key_button"),
+            modifier = Modifier.minimumInteractiveComponentSize().testTag("add_single_key_button"),
           ) {
             Icon(
               imageVector = Icons.Rounded.Add,
@@ -117,12 +145,90 @@ fun ApiKeysScreen(
 
       Spacer(modifier = Modifier.height(12.dp))
 
+      val segmentedColors =
+        SegmentedButtonDefaults.colors(
+          activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+          activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+          inactiveContainerColor = MaterialTheme.colorScheme.surface,
+          inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+          activeBorderColor = MaterialTheme.colorScheme.outlineVariant,
+          inactiveBorderColor = MaterialTheme.colorScheme.outlineVariant,
+        )
+
+      SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        ApiProvider.entries.forEachIndexed { index, provider ->
+          val count = apiKeys.count { it.provider == provider }
+          SegmentedButton(
+            selected = selectedProvider == provider,
+            onClick = { selectedProvider = provider },
+            shape = SegmentedButtonDefaults.itemShape(index = index, count = ApiProvider.entries.size),
+            colors = segmentedColors,
+            modifier = Modifier.testTag("provider_segment_${provider.name.lowercase()}"),
+          ) {
+            Text(
+              text = "${provider.displayName} ($count)",
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(10.dp))
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        if (selectedProvider == activeProvider) {
+          Surface(
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.tertiaryContainer,
+            modifier = Modifier.testTag("active_provider_badge"),
+          ) {
+            Row(
+              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+              Icon(
+                imageVector = Icons.Rounded.CheckCircle,
+                contentDescription = "Active provider",
+                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                modifier = Modifier.size(16.dp),
+              )
+              Text(
+                text = "${selectedProvider.displayName} Active for Translation",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer,
+              )
+            }
+          }
+        } else {
+          Text(
+            text = "Active provider: ${activeProvider.displayName}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+          )
+          FilledTonalButton(
+            onClick = { onSetActiveProvider(selectedProvider) },
+            enabled = !isTranslationRunning,
+            modifier = Modifier.minimumInteractiveComponentSize().testTag("activate_provider_button"),
+          ) {
+            Text("Use ${selectedProvider.displayName}")
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(12.dp))
+
       FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
       ) {
         StatusPill(
-          text = "Total: ${apiKeys.size}",
+          text = "Total: ${providerKeys.size}",
           containerColor = MaterialTheme.colorScheme.surfaceContainer,
           contentColor = MaterialTheme.colorScheme.onSurface,
         )
@@ -147,15 +253,15 @@ fun ApiKeysScreen(
         }
       }
 
-      if (apiKeys.isNotEmpty() && !isTranslationRunning) {
+      if (providerKeys.isNotEmpty() && !isTranslationRunning) {
         Spacer(modifier = Modifier.height(12.dp))
         Row(
           modifier = Modifier.fillMaxWidth(),
           horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
           OutlinedButton(
-            onClick = onResetAllStatuses,
-            modifier = Modifier.weight(1f).testTag("reset_key_statuses_button"),
+            onClick = { onResetAllStatuses(selectedProvider) },
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("reset_key_statuses_button"),
           ) {
             Icon(
               imageVector = Icons.Rounded.Refresh,
@@ -169,7 +275,7 @@ fun ApiKeysScreen(
           OutlinedButton(
             onClick = { showClearAllConfirm = true },
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
-            modifier = Modifier.weight(1f).testTag("clear_all_keys_button"),
+            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("clear_all_keys_button"),
           ) {
             Icon(
               imageVector = Icons.Rounded.DeleteForever,
@@ -184,11 +290,11 @@ fun ApiKeysScreen(
       }
     }
 
-    // 2. Bulk Paste Card (Supports 25+ keys simultaneously)
+    // 2. Bulk Paste & .txt Import Card (per selected provider)
     StudioSectionCard {
       SectionTitleRow(
-        title = "Bulk Paste Gemini Keys",
-        subtitle = "Paste 25+ keys separated by newlines, commas, or spaces",
+        title = "Bulk Paste ${selectedProvider.displayName} Keys",
+        subtitle = "Paste keys separated by newlines, commas, spaces, or import a .txt file",
         icon = Icons.Rounded.VpnKey,
       )
 
@@ -197,10 +303,14 @@ fun ApiKeysScreen(
       OutlinedTextField(
         value = bulkInput,
         onValueChange = { bulkInput = it },
-        label = { Text("Paste API Keys Here") },
-        placeholder = { Text("AIzaSy...\nAIzaSy...\nAIzaSy...") },
-        minLines = 5,
-        maxLines = 10,
+        label = { Text("Paste ${selectedProvider.displayName} API Keys Here") },
+        placeholder = {
+          Text(
+            "${selectedProvider.keyPlaceholder}\n${selectedProvider.keyPlaceholder}\n${selectedProvider.keyPlaceholder}"
+          )
+        },
+        minLines = 4,
+        maxLines = 9,
         enabled = !isTranslationRunning,
         textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
         modifier = Modifier.fillMaxWidth().testTag("bulk_keys_input"),
@@ -219,50 +329,78 @@ fun ApiKeysScreen(
             else "Supports unlimited simultaneous keys",
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
+          modifier = Modifier.testTag("bulk_keys_detected_count"),
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          if (bulkInput.isNotBlank()) {
-            TextButton(onClick = { bulkInput = "" }) {
-              Text("Clear")
-            }
+        if (bulkInput.isNotBlank()) {
+          TextButton(onClick = { bulkInput = "" }) {
+            Text("Clear")
           }
-          Button(
-            onClick = {
-              onSaveBulkKeys(bulkInput)
-              bulkInput = ""
-            },
-            enabled = detectedBulkCount > 0 && !isTranslationRunning,
-            shape = BSubShape.petalButton,
-            modifier = Modifier.testTag("save_bulk_keys_button"),
-          ) {
-            Text("Save Keys")
-          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(8.dp))
+
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        OutlinedButton(
+          onClick = { keyFileLauncher.launch(SubtitleFileStorage.TEXT_KEY_FILE_MIME_TYPES) },
+          enabled = !isTranslationRunning,
+          shape = BSubShape.petalButton,
+          modifier =
+            Modifier.weight(1f)
+              .minimumInteractiveComponentSize()
+              .testTag("import_keys_file_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.UploadFile,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+          )
+          Spacer(modifier = Modifier.width(6.dp))
+          Text("Import .txt", maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+
+        Button(
+          onClick = {
+            onSaveBulkKeys(bulkInput, selectedProvider)
+            bulkInput = ""
+          },
+          enabled = detectedBulkCount > 0 && !isTranslationRunning,
+          shape = BSubShape.petalButton,
+          modifier =
+            Modifier.weight(1f)
+              .minimumInteractiveComponentSize()
+              .testTag("save_bulk_keys_button"),
+        ) {
+          Text("Save Keys", maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
       }
     }
 
-    // 3. Saved Keys List
+    // 3. Saved Keys List (for selected provider)
     StudioSectionCard {
       SectionTitleRow(
-        title = "Saved Key Rotation Pool (${apiKeys.size})",
+        title = "${selectedProvider.displayName} Key Pool (${providerKeys.size})",
         subtitle = "Keys rotate sequentially on failures or quota limits",
         icon = Icons.Rounded.Key,
       )
 
       Spacer(modifier = Modifier.height(12.dp))
 
-      if (apiKeys.isEmpty()) {
+      if (providerKeys.isEmpty()) {
         Text(
           text =
-            "No Gemini API keys saved yet. Paste your keys in the bulk box above or tap 'Add One'.",
+            "No ${selectedProvider.displayName} API keys saved yet. Paste your keys above or tap 'Add One'.",
           style = MaterialTheme.typography.bodyMedium,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
           modifier = Modifier.padding(vertical = 8.dp),
         )
       } else {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-          apiKeys.forEachIndexed { idx, entry ->
+          providerKeys.forEachIndexed { idx, entry ->
             ApiKeyRow(
               position = idx + 1,
               entry = entry,
@@ -280,12 +418,14 @@ fun ApiKeysScreen(
 
   if (showAddSingleDialog) {
     ApiKeyEditorDialog(
-      title = "Add Gemini API Key",
-      initialLabel = "Key #${apiKeys.size + 1}",
+      title = "Add ${selectedProvider.displayName} API Key",
+      keyFieldLabel = "${selectedProvider.displayName} API Key",
+      keyPlaceholder = selectedProvider.keyPlaceholder,
+      initialLabel = "Key #${providerKeys.size + 1}",
       initialKey = "",
       onDismiss = { showAddSingleDialog = false },
       onConfirm = { key, label ->
-        onAddSingleKey(key, label)
+        onAddSingleKey(key, label, selectedProvider)
         showAddSingleDialog = false
       },
     )
@@ -293,7 +433,9 @@ fun ApiKeysScreen(
 
   editingKey?.let { entry ->
     ApiKeyEditorDialog(
-      title = "Edit API Key",
+      title = "Edit ${entry.provider.displayName} API Key",
+      keyFieldLabel = "${entry.provider.displayName} API Key",
+      keyPlaceholder = entry.provider.keyPlaceholder,
       initialLabel = entry.label,
       initialKey = entry.key,
       onDismiss = { editingKey = null },
@@ -307,16 +449,16 @@ fun ApiKeysScreen(
   if (showClearAllConfirm) {
     AlertDialog(
       onDismissRequest = { showClearAllConfirm = false },
-      title = { Text("Remove All API Keys?") },
+      title = { Text("Remove ${selectedProvider.displayName} Keys?") },
       text = {
         Text(
-          "This will permanently delete all ${apiKeys.size} saved Gemini API keys from encrypted storage."
+          "This will permanently delete all ${providerKeys.size} saved ${selectedProvider.displayName} API keys from encrypted storage."
         )
       },
       confirmButton = {
         Button(
           onClick = {
-            onClearAllKeys()
+            onClearAllKeys(selectedProvider)
             showClearAllConfirm = false
           }
         ) {
@@ -374,6 +516,7 @@ private fun ApiKeyRow(
     shape = RoundedCornerShape(12.dp),
     color = MaterialTheme.colorScheme.surfaceContainerLow,
     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    modifier = Modifier.testTag("api_key_row_${entry.provider.name.lowercase()}_$position"),
   ) {
     Row(
       modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
@@ -454,6 +597,8 @@ private fun ApiKeyRow(
 @Composable
 private fun ApiKeyEditorDialog(
   title: String,
+  keyFieldLabel: String,
+  keyPlaceholder: String,
   initialLabel: String,
   initialKey: String,
   onDismiss: () -> Unit,
@@ -472,16 +617,16 @@ private fun ApiKeyEditorDialog(
           onValueChange = { label = it },
           label = { Text("Label (Optional)") },
           singleLine = true,
-          modifier = Modifier.fillMaxWidth(),
+          modifier = Modifier.fillMaxWidth().testTag("dialog_key_label_input"),
         )
         OutlinedTextField(
           value = key,
           onValueChange = { key = it },
-          label = { Text("Gemini API Key") },
-          placeholder = { Text("AIzaSy...") },
+          label = { Text(keyFieldLabel) },
+          placeholder = { Text(keyPlaceholder) },
           singleLine = true,
           textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
-          modifier = Modifier.fillMaxWidth(),
+          modifier = Modifier.fillMaxWidth().testTag("dialog_key_value_input"),
         )
       }
     },
@@ -489,6 +634,7 @@ private fun ApiKeyEditorDialog(
       Button(
         onClick = { onConfirm(key, label) },
         enabled = key.trim().length >= 16,
+        modifier = Modifier.testTag("dialog_key_save_button"),
       ) {
         Text("Save")
       }

@@ -3,6 +3,7 @@ package com.example.data.network
 import com.example.data.preferences.SecureKeyStorage
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import com.example.logging.ErrorCategory
 import com.example.logging.TranslationLogger
 import kotlinx.coroutines.runBlocking
@@ -29,12 +30,16 @@ interface GeminiKeyPoolProvider {
 class DataStoreKeyPoolProvider(
   private val keyStorage: SecureKeyStorage,
 ) : GeminiKeyPoolProvider {
-  override fun getKeysSnapshot(): List<ApiKeyEntry> = runBlocking { keyStorage.getKeysSnapshot() }
+  override fun getKeysSnapshot(): List<ApiKeyEntry> = runBlocking {
+    keyStorage.getKeysSnapshot(ApiProvider.GEMINI)
+  }
 
-  override fun getActiveKeyIndex(): Int = runBlocking { keyStorage.getActiveKeyIndex() }
+  override fun getActiveKeyIndex(): Int = runBlocking {
+    keyStorage.getActiveKeyIndex(ApiProvider.GEMINI)
+  }
 
   override fun setActiveKeyIndex(index: Int) {
-    runBlocking { keyStorage.setActiveKeyIndex(index) }
+    runBlocking { keyStorage.setActiveKeyIndex(index, ApiProvider.GEMINI) }
   }
 
   override fun markKeyStatus(keyId: String, status: ApiKeyStatus, errorReason: String?) {

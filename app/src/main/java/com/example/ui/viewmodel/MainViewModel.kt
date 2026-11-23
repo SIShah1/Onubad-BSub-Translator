@@ -12,6 +12,7 @@ import com.example.data.local.SubtitleTranslation
 import com.example.data.local.SubtitleTranslationStatus
 import com.example.data.local.TranslationHistoryEntity
 import com.example.domain.model.ApiKeyEntry
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.FewShotExample
 import com.example.domain.model.InputMode
@@ -297,8 +298,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       _uiMessages.tryEmit("Please select at least one valid .srt subtitle file.")
       return false
     }
-    if (apiKeys.value.isEmpty()) {
-      _uiMessages.tryEmit("Please add at least one Gemini API key in the Keys tab.")
+    val activeProvider = settings.value.apiProvider
+    if (apiKeys.value.none { it.provider == activeProvider }) {
+      _uiMessages.tryEmit("Please add at least one ${activeProvider.displayName} API key in the Keys tab.")
       return false
     }
     if (sessionState.value.isRunningOrCooldown) {
@@ -334,18 +336,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   // --- API Key Manager ---
 
-  fun saveBulkApiKeys(rawInput: String) {
+  fun saveBulkApiKeys(
+    rawInput: String,
+    provider: ApiProvider = ApiProvider.GEMINI,
+  ) {
     viewModelScope.launch {
-      val added = keyStorage.addBulkKeys(rawInput)
+      val added = keyStorage.addBulkKeys(rawInput, provider)
       if (added > 0) {
-        _uiMessages.emit("Saved $added new API key(s) securely.")
+        _uiMessages.emit("Saved $added new ${provider.displayName} API key(s) securely.")
       } else {
-        _uiMessages.emit("No new valid API keys found to add.")
+        _uiMessages.emit("No new valid ${provider.displayName} API keys found to add.")
       }
     }
   }
 
-  fun importApiKeysFromUri(uri: Uri?) {
+  fun importApiKeysFromUri(
+    uri: Uri?,
+    provider: ApiProvider = ApiProvider.GEMINI,
+  ) {
     if (uri == null) return
     viewModelScope.launch {
       fileStorage.takePersistableReadPermission(uri)
@@ -354,23 +362,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiMessages.emit("Unable to read API keys from the selected file.")
         return@launch
       }
-      val added = keyStorage.addBulkKeys(rawText)
+      val added = keyStorage.addBulkKeys(rawText, provider)
       if (added > 0) {
-        _uiMessages.emit("Imported $added new Gemini API key(s) from file.")
+        _uiMessages.emit("Imported $added new ${provider.displayName} API key(s) from file.")
       } else {
-        _uiMessages.emit("No new valid Gemini API keys found in the selected file.")
+        _uiMessages.emit("No new valid ${provider.displayName} API keys found in the selected file.")
       }
     }
   }
 
-  fun addSingleApiKey(key: String, label: String) {
+  fun addSingleApiKey(
+    key: String,
+    label: String,
+    provider: ApiProvider = ApiProvider.GEMINI,
+  ) {
     viewModelScope.launch {
       if (key.trim().length < 16) {
         _uiMessages.emit("API key appears too short.")
         return@launch
       }
-      keyStorage.addSingleKey(key, label)
-      _uiMessages.emit("API key saved securely.")
+      keyStorage.addSingleKey(key, label, provider)
+      _uiMessages.emit("${provider.displayName} API key saved securely.")
     }
   }
 
@@ -385,17 +397,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     viewModelScope.launch { keyStorage.removeKey(id) }
   }
 
-  fun clearAllApiKeys() {
+  fun clearAllApiKeys(provider: ApiProvider? = null) {
     viewModelScope.launch {
-      keyStorage.clearAllKeys()
-      _uiMessages.emit("All API keys removed.")
+      keyStorage.clearAllKeys(provider)
+      val msg =
+        if (provider == null) "All API keys removed."
+        else "All ${provider.displayName} API keys removed."
+      _uiMessages.emit(msg)
     }
   }
 
-  fun resetAllKeyStatuses() {
+  fun resetAllKeyStatuses(provider: ApiProvider? = null) {
     viewModelScope.launch {
-      keyStorage.resetAllKeyStatuses()
-      _uiMessages.emit("All key statuses reset to Active.")
+      keyStorage.resetAllKeyStatuses(provider)
+      val msg =
+        if (provider == null) "All key statuses reset to Active."
+        else "${provider.displayName} key statuses reset to Active."
+      _uiMessages.emit(msg)
     }
   }
 
@@ -507,6 +525,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun setContextLines(mode: ParamMode, manualValue: Int) {
     viewModelScope.launch { settingsRepo.setContextLines(mode, manualValue) }
+  }
+
+  fun setApiProvider(provider: ApiProvider) {
+    viewModelScope.launch { settingsRepo.setApiProvider(provider) }
   }
 
   // --- History & Export ---

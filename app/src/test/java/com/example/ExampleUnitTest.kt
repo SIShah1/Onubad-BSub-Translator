@@ -3,6 +3,7 @@ package com.example
 import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiCallResult
 import com.example.data.preferences.SecureKeyStorage
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DefaultConfig
 import com.example.domain.model.InputMode
@@ -539,5 +540,57 @@ class ExampleUnitTest {
     val targetTurnText = withContextReq.contents.last().parts.first().text.orEmpty()
     assertTrue(targetTurnText.contains("Target line"))
     assertFalse(targetTurnText.contains("Who is there?"))
+  }
+
+  @Test
+  fun `provider default models chat completion request and 402 or 401 errors work for grok and deepseek`() {
+    assertEquals(DefaultConfig.GEMINI_MODEL, AppSettings(apiProvider = ApiProvider.GEMINI).effectiveModel)
+    assertEquals(DefaultConfig.GROK_MODEL, AppSettings(apiProvider = ApiProvider.GROK).effectiveModel)
+    assertEquals(DefaultConfig.DEEPSEEK_MODEL, AppSettings(apiProvider = ApiProvider.DEEPSEEK).effectiveModel)
+
+    val client = GeminiApiClient()
+    val chatReq =
+      client.buildChatCompletionRequest(
+        model = "grok-3-mini",
+        systemPrompt = "Translate SRT",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.SERIES,
+        title = "Andor",
+        secondaryMeta = "S02",
+        batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nTarget line",
+        batchIndex = 1,
+        totalBatches = 1,
+        fileName = "ep01.srt",
+        temperature = 0.25f,
+        surroundingContext = "FOLLOWING LINES:\n[#2] \"Next cue\"",
+      )
+    assertEquals("grok-3-mini", chatReq.model)
+    assertEquals("system", chatReq.messages.first().role)
+    assertTrue(chatReq.messages.first().content.contains("Series Name: Andor"))
+    assertEquals("user", chatReq.messages[1].role)
+    assertTrue(chatReq.messages[1].content.contains("SURROUNDING DIALOGUE CONTEXT"))
+    assertEquals("assistant", chatReq.messages[2].role)
+    assertEquals("user", chatReq.messages.last().role)
+    assertTrue(chatReq.messages.last().content.contains("Target line"))
+
+    val insufficientBalance =
+      client.classifyHttpFailure(
+        402,
+        """{"error":{"message":"Insufficient Balance","type":"invalid_request_error"}}""",
+      )
+    assertTrue(
+      "Expected QuotaExhausted for DeepSeek 402, got $insufficientBalance",
+      insufficientBalance is GeminiCallResult.QuotaExhausted,
+    )
+
+    val badBearerKey =
+      client.classifyHttpFailure(
+        401,
+        """{"error":{"message":"Incorrect API key provided","type":"invalid_request_error","code":"invalid_api_key"}}""",
+      )
+    assertTrue(
+      "Expected InvalidKey for OpenAI-style 401, got $badBearerKey",
+      badBearerKey is GeminiCallResult.InvalidKey,
+    )
   }
 }

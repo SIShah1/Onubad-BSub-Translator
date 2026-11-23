@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DefaultConfig
 import com.example.domain.model.FewShotExample
@@ -52,6 +53,7 @@ class SettingsRepository(private val context: Context) {
     val MANUAL_COOLDOWN_MINUTES = intPreferencesKey("manual_cooldown_minutes")
     val CONTEXT_LINES_MODE = stringPreferencesKey("context_lines_mode")
     val MANUAL_CONTEXT_LINES = intPreferencesKey("manual_context_lines")
+    val API_PROVIDER = stringPreferencesKey("api_provider")
   }
 
   val settingsFlow: Flow<AppSettings> =
@@ -88,6 +90,7 @@ class SettingsRepository(private val context: Context) {
         contextLinesMode = enumOrDefault(prefs[Keys.CONTEXT_LINES_MODE], ParamMode.DEFAULT),
         manualContextLines =
           prefs[Keys.MANUAL_CONTEXT_LINES] ?: DefaultConfig.CONTEXT_LINES,
+        apiProvider = enumOrDefault(prefs[Keys.API_PROVIDER], ApiProvider.GEMINI),
       )
     }
 
@@ -191,6 +194,12 @@ class SettingsRepository(private val context: Context) {
       it[Keys.CONTEXT_LINES_MODE] = mode.name
       it[Keys.MANUAL_CONTEXT_LINES] =
         manualValue.coerceIn(DefaultConfig.MIN_CONTEXT_LINES, DefaultConfig.MAX_CONTEXT_LINES)
+    }
+  }
+
+  suspend fun setApiProvider(provider: ApiProvider) {
+    context.settingsDataStore.edit {
+      it[Keys.API_PROVIDER] = provider.name
     }
   }
 

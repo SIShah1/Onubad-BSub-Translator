@@ -266,8 +266,6 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 onStartTranslation = { viewModel.startTranslation() },
                 onAbortTranslation = viewModel::abortTranslation,
                 onClearLogs = viewModel::clearProcessingLogs,
-                onImportBulkKeys = viewModel::saveBulkApiKeys,
-                onImportKeysFile = viewModel::importApiKeysFromUri,
                 onPreviewFile = viewModel::openStudioFilePreview,
                 onNavigateToKeys = { navigateToTab(AppDestination.KEYS.route) },
               )
@@ -277,7 +275,10 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
               ApiKeysScreen(
                 apiKeys = apiKeys,
                 isTranslationRunning = sessionState.isRunningOrCooldown,
+                activeProvider = settings.apiProvider,
+                onSetActiveProvider = viewModel::setApiProvider,
                 onSaveBulkKeys = viewModel::saveBulkApiKeys,
+                onImportKeysFile = viewModel::importApiKeysFromUri,
                 onAddSingleKey = viewModel::addSingleApiKey,
                 onEditKey = viewModel::editApiKey,
                 onRemoveKey = viewModel::removeApiKey,

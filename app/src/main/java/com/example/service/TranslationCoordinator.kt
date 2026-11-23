@@ -232,19 +232,21 @@ class TranslationCoordinator(
     workId: String? = null,
   ) {
     val settings = settingsRepository.getSettingsSnapshot()
-    val rotationSession = keyRotationManager.prepareSession()
+    val rotationSession = keyRotationManager.prepareSession(settings.apiProvider)
     val allKeys = rotationSession.keys
 
     if (allKeys.isEmpty()) {
-      appendLog("No Gemini API keys configured. Add keys in API Key Manager.", LogLevel.ERROR)
+      val missingMsg =
+        "No ${settings.apiProvider.displayName} API keys configured. Add keys in API Key Manager."
+      appendLog(missingMsg, LogLevel.ERROR)
       TranslationLogger.logWorkerError(
         workId = workId,
-        message = "No Gemini API keys configured. Add keys in API Key Manager.",
+        message = missingMsg,
       )
       _sessionState.update {
         it.copy(
           status = TranslationStatus.FAILED,
-          activePhaseMessage = "No Gemini API keys configured",
+          activePhaseMessage = "No ${settings.apiProvider.displayName} API keys configured",
         )
       }
       return
@@ -273,7 +275,7 @@ class TranslationCoordinator(
       )
 
     appendLog(
-      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.effectiveModel}, context: ${settings.effectiveContextLines} lines)",
+      "Started ${request.inputMode.name.lowercase()} job: $totalFiles file(s), $totalBlocksAllFiles blocks (${settings.apiProvider.displayName} • ${settings.effectiveModel}, context: ${settings.effectiveContextLines} lines)",
       LogLevel.INFO,
     )
 

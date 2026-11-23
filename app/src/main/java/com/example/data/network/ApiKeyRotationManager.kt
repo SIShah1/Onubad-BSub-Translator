@@ -3,6 +3,7 @@ package com.example.data.network
 import com.example.data.preferences.SecureKeyStorage
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.FewShotExample
 import com.example.domain.model.InputMode
@@ -30,6 +31,7 @@ data class KeyRotationState(
 class KeyRotationSession internal constructor(
   val keys: List<ApiKeyEntry>,
   initialIndex: Int,
+  val provider: ApiProvider = ApiProvider.GEMINI,
 ) {
   var currentIndex: Int =
     if (keys.isEmpty()) 0 else initialIndex.coerceIn(0, keys.lastIndex)
@@ -101,24 +103,24 @@ class ApiKeyRotationManager(
   private val _rotationState = MutableStateFlow(KeyRotationState())
   val rotationState: StateFlow<KeyRotationState> = _rotationState.asStateFlow()
 
-  suspend fun prepareSession(): KeyRotationSession =
+  suspend fun prepareSession(provider: ApiProvider = ApiProvider.GEMINI): KeyRotationSession =
     rotationMutex.withLock {
-      keyStorage.resetExhaustedAndCooldownKeys()
-      var keys = keyStorage.getKeysSnapshot()
+      keyStorage.resetExhaustedAndCooldownKeys(provider)
+      var keys = keyStorage.getKeysSnapshot(provider)
       if (keys.isNotEmpty() && keys.all { it.status == ApiKeyStatus.INVALID }) {
         // Allow retry if user edited or re-enabled previously invalid keys
-        keyStorage.resetAllKeyStatuses()
-        keys = keyStorage.getKeysSnapshot()
+        keyStorage.resetAllKeyStatuses(provider)
+        keys = keyStorage.getKeysSnapshot(provider)
       }
 
       val persistedIdx =
-        if (keys.isEmpty()) 0 else keyStorage.getActiveKeyIndex() % keys.size
-      val session = KeyRotationSession(keys = keys, initialIndex = persistedIdx)
+        if (keys.isEmpty()) 0 else keyStorage.getActiveKeyIndex(provider) % keys.size
+      val session = KeyRotationSession(keys = keys, initialIndex = persistedIdx, provider = provider)
 
       val activeIdx = session.findNextAvailableIndex(persistedIdx) ?: 0
       session.currentIndex = activeIdx
       if (keys.isNotEmpty()) {
-        keyStorage.setActiveKeyIndex(activeIdx)
+        keyStorage.setActiveKeyIndex(activeIdx, provider)
       }
 
       publishState(session, inCooldown = false)
@@ -129,7 +131,7 @@ class ApiKeyRotationManager(
     rotationMutex.withLock {
       val idx = session.findNextAvailableIndex(session.currentIndex) ?: return@withLock null
       session.currentIndex = idx
-      keyStorage.setActiveKeyIndex(idx)
+      keyStorage.setActiveKeyIndex(idx, session.provider)
       publishState(session, inCooldown = false)
       idx to session.keys[idx]
     }
@@ -160,7 +162,7 @@ class ApiKeyRotationManager(
       val nextIdx = session.findNextAvailableIndex(nextStart)
       if (nextIdx != null) {
         session.currentIndex = nextIdx
-        keyStorage.setActiveKeyIndex(nextIdx)
+        keyStorage.setActiveKeyIndex(nextIdx, session.provider)
         publishState(session, inCooldown = false)
         nextIdx to session.keys[nextIdx]
       } else {
@@ -192,7 +194,7 @@ class ApiKeyRotationManager(
     rotationMutex.withLock {
       session.exhaustedIndices.retainAll(session.dailyQuotaExhaustedIndices)
       session.rateLimitedIndices.clear()
-      keyStorage.resetExhaustedAndCooldownKeys()
+      keyStorage.resetExhaustedAndCooldownKeys(session.provider)
       for (idx in session.dailyQuotaExhaustedIndices) {
         if (idx in session.invalidIndices) continue
         val entry = session.keys.getOrNull(idx) ?: continue
@@ -205,7 +207,7 @@ class ApiKeyRotationManager(
       val nextIdx = session.findNextAvailableIndex(0) ?: 0
       session.currentIndex = nextIdx
       if (session.keys.isNotEmpty()) {
-        keyStorage.setActiveKeyIndex(nextIdx)
+        keyStorage.setActiveKeyIndex(nextIdx, session.provider)
       }
       publishState(session, inCooldown = false)
       nextIdx
@@ -230,6 +232,7 @@ class ApiKeyRotationManager(
     cooldownMinutes: Int,
     workId: String? = null,
     surroundingContext: String = "",
+    provider: ApiProvider = session.provider,
     validateOutput: (String) -> BatchValidationOutcome<T>,
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
@@ -245,7 +248,7 @@ class ApiKeyRotationManager(
   ): RotationExecutionResult<T> {
     if (session.keys.isEmpty()) {
       return RotationExecutionResult.Failure(
-        "No Gemini API keys configured. Add keys in API Key Manager."
+        "No ${provider.displayName} API keys configured. Add keys in API Key Manager."
       )
     }
 
@@ -329,6 +332,7 @@ class ApiKeyRotationManager(
             totalBatches = totalBatches,
             fileName = fileName,
             surroundingContext = surroundingContext,
+            provider = provider,
           )
 
         when (apiResult) {
@@ -552,7 +556,7 @@ class ApiKeyRotationManager(
       delay(minutes * 60_000L)
     },
   ): RotationExecutionResult<String> {
-    val session = prepareSession()
+    val session = prepareSession(settings.apiProvider)
     return executeBatchWithRotation(
       session = session,
       model = settings.effectiveModel,
@@ -572,9 +576,13 @@ class ApiKeyRotationManager(
       cooldownMinutes = settings.effectiveCooldownMinutes,
       workId = workId,
       surroundingContext = surroundingContext,
+      provider = settings.apiProvider,
       validateOutput = { raw ->
-        if (raw.isBlank()) BatchValidationOutcome.Invalid("Empty response from Gemini")
-        else BatchValidationOutcome.Valid(raw)
+        if (raw.isBlank()) {
+          BatchValidationOutcome.Invalid("Empty response from ${settings.apiProvider.displayName}")
+        } else {
+          BatchValidationOutcome.Valid(raw)
+        }
       },
       onRetryDelay = onRetryDelay,
       onCooldownWait = onCooldownWait,

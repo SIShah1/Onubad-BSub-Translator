@@ -28,6 +28,15 @@ enum class ParamMode {
   MANUAL,
 }
 
+enum class ApiProvider(
+  val displayName: String,
+  val keyPlaceholder: String,
+) {
+  GEMINI(displayName = "Gemini", keyPlaceholder = "AIzaSy..."),
+  GROK(displayName = "Grok", keyPlaceholder = "xai-..."),
+  DEEPSEEK(displayName = "DeepSeek", keyPlaceholder = "sk-..."),
+}
+
 enum class ApiKeyStatus {
   ACTIVE,
   QUOTA_EXHAUSTED,
@@ -74,6 +83,7 @@ data class ApiKeyEntry(
   val label: String,
   val status: ApiKeyStatus = ApiKeyStatus.ACTIVE,
   val lastError: String? = null,
+  val provider: ApiProvider = ApiProvider.GEMINI,
 )
 
 data class FewShotExample(
@@ -86,6 +96,8 @@ data class FewShotExample(
 object DefaultConfig {
   const val CHUNK_SIZE = 150
   const val GEMINI_MODEL = "gemini-3.8-flash"
+  const val GROK_MODEL = "grok-3-mini"
+  const val DEEPSEEK_MODEL = "deepseek-chat"
   const val TEMPERATURE = 0.3f
   const val THINKING_BUDGET = 0
   const val RETRY_INTERVAL_SECONDS = 5
@@ -98,6 +110,20 @@ object DefaultConfig {
 
   val PRESET_CHUNK_SIZES = listOf(100, 150, 200, 300)
   val PRESET_CONTEXT_LINES = listOf(0, 25, 50, 100, 150)
+
+  fun defaultModelFor(provider: ApiProvider): String =
+    when (provider) {
+      ApiProvider.GEMINI -> GEMINI_MODEL
+      ApiProvider.GROK -> GROK_MODEL
+      ApiProvider.DEEPSEEK -> DEEPSEEK_MODEL
+    }
+
+  fun presetModelsFor(provider: ApiProvider): List<String> =
+    when (provider) {
+      ApiProvider.GEMINI -> listOf(GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.5-pro")
+      ApiProvider.GROK -> listOf(GROK_MODEL, "grok-3", "grok-3-fast", "grok-4")
+      ApiProvider.DEEPSEEK -> listOf(DEEPSEEK_MODEL, "deepseek-reasoner")
+    }
 
   val BUILT_IN_PROMPT =
     """
@@ -146,6 +172,7 @@ data class AppSettings(
   val manualCooldownMinutes: Int = DefaultConfig.COOLDOWN_MINUTES,
   val contextLinesMode: ParamMode = ParamMode.DEFAULT,
   val manualContextLines: Int = DefaultConfig.CONTEXT_LINES,
+  val apiProvider: ApiProvider = ApiProvider.GEMINI,
 ) {
   val effectivePrompt: String
     get() =
@@ -168,7 +195,7 @@ data class AppSettings(
       if (modelMode == ParamMode.MANUAL && manualModel.isNotBlank()) {
         manualModel.trim()
       } else {
-        DefaultConfig.GEMINI_MODEL
+        DefaultConfig.defaultModelFor(apiProvider)
       }
 
   val effectiveTemperature: Float

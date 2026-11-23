@@ -142,18 +142,14 @@ fun StudioScreen(
       onMultipleSrtPicked(uris)
     }
 
-  val keyFileLauncher =
-    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-      onImportKeysFile(uri)
-    }
-
   val notificationPermissionLauncher =
     rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
       onStartTranslation()
     }
 
   val isRunning = sessionState.isRunningOrCooldown
-  val activeKeysCount = apiKeys.count { it.status == ApiKeyStatus.ACTIVE }
+  val providerKeys = apiKeys.filter { it.provider == settings.apiProvider }
+  val activeKeysCount = providerKeys.count { it.status == ApiKeyStatus.ACTIVE }
 
   Column(
     modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -163,7 +159,7 @@ fun StudioScreen(
     StudioHeroBanner(
       modelName = settings.effectiveModel,
       chunkSize = settings.effectiveChunkSize,
-      totalKeysCount = apiKeys.size,
+      totalKeysCount = providerKeys.size,
       activeKeysCount = activeKeysCount,
       onNavigateToKeys = onNavigateToKeys,
     )
@@ -362,18 +358,7 @@ fun StudioScreen(
       )
     }
 
-    // 4. Bulk Gemini API Key Import (Manual Paste or Text File)
-    StudioBulkKeyImportCard(
-      apiKeys = apiKeys,
-      isRunning = isRunning,
-      onImportBulkKeys = onImportBulkKeys,
-      onLaunchKeyFilePicker = {
-        keyFileLauncher.launch(SubtitleFileStorage.TEXT_KEY_FILE_MIME_TYPES)
-      },
-      onNavigateToKeys = onNavigateToKeys,
-    )
-
-    // 5. Primary Start / Abort Action Row
+    // 4. Primary Start / Abort Action Row
     Row(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.spacedBy(12.dp),

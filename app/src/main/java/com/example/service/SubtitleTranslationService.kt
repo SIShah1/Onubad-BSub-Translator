@@ -319,6 +319,7 @@ class SubtitleTranslationService(
         cooldownMinutes = settings.effectiveCooldownMinutes,
         workId = workId,
         surroundingContext = sliceContext,
+        provider = settings.apiProvider,
         validateOutput = { rawText ->
           val parsedOutput = SrtEngine.parseModelOutput(rawText)
           when (val reconciled = SrtEngine.reconcileBatch(blocks, parsedOutput)) {
@@ -454,10 +455,10 @@ class SubtitleTranslationService(
       )
     }
 
-    val session = keyRotationManager.prepareSession()
+    val session = keyRotationManager.prepareSession(settings.apiProvider)
     if (session.keys.isEmpty()) {
       return SubtitleTranslationServiceResult.Failure(
-        reason = "No Gemini API keys configured. Add keys in API Key Manager."
+        reason = "No ${settings.apiProvider.displayName} API keys configured. Add keys in API Key Manager."
       )
     }
 
