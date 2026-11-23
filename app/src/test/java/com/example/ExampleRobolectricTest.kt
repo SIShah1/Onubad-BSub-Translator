@@ -3238,4 +3238,54 @@ class ExampleRobolectricTest {
         observedRequests,
       )
     }
+
+  @Test
+  fun `persisted false gemini error on grok key auto-heals immediately in settings ui and storage`() {
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setApiProvider(ApiProvider.GROK)
+      app.settingsRepository.setModel(ParamMode.DEFAULT, DefaultConfig.GEMINI_MODEL)
+
+      app.secureKeyStorage.addSingleKey("xai-persisted-grok-key-12345678", "Key #1", ApiProvider.GROK)
+      val saved = app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).single()
+      app.secureKeyStorage.updateKeyStatus(
+        saved.id,
+        ApiKeyStatus.INVALID,
+        "No Gemini API keys configured in DataStore",
+      )
+    }
+
+    val viewModel = MainViewModel(app)
+    composeTestRule.setContent {
+      val settings by viewModel.settings.collectAsState()
+      BSubTranslatorTheme {
+        SettingsScreen(
+          settings = settings,
+          viewModel = viewModel,
+        )
+      }
+    }
+
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("settings_active_engine_badge")
+          .assertTextContains("1 active key(s)", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    composeTestRule.onNodeWithTag("settings_active_engine_badge")
+      .assertTextContains("Active Engine: Grok", substring = true)
+    composeTestRule.onNodeWithText("No Gemini API keys configured in DataStore").assertDoesNotExist()
+    composeTestRule.onNodeWithText("Active: 1").performScrollTo().assertIsDisplayed()
+
+    runBlocking {
+      val healed = app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).single()
+      assertEquals(ApiKeyStatus.ACTIVE, healed.status)
+      assertEquals(null, healed.lastError)
+    }
+  }
 }

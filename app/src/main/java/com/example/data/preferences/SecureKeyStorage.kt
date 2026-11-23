@@ -202,6 +202,42 @@ class SecureKeyStorage(private val context: Context) {
     }
   }
 
+  /**
+   * Clears bogus "No Gemini API keys configured" / "All configured Gemini API keys" errors
+   * previously persisted onto Grok/DeepSeek keys by older builds where the Gemini interceptor
+   * was shared across providers.
+   */
+  suspend fun sanitizeFalseGeminiErrorsOnNonGeminiKeys() {
+    context.secureKeysDataStore.edit { prefs ->
+      val encoded = prefs[encryptedKeysPref] ?: return@edit
+      val current = decodeEncryptedPayload(encoded, sanitizeLegacyErrors = false)
+      val sanitized = current.map(::healIfFalseGeminiError)
+      if (sanitized != current) {
+        prefs[encryptedKeysPref] = encodeEncryptedPayload(sanitized)
+      }
+    }
+  }
+
+  private fun healIfFalseGeminiError(entry: ApiKeyEntry): ApiKeyEntry {
+    return if (isFalseGeminiErrorOnOtherProvider(entry.provider, entry.status, entry.lastError)) {
+      entry.copy(status = ApiKeyStatus.ACTIVE, lastError = null)
+    } else {
+      entry
+    }
+  }
+
+  private fun isFalseGeminiErrorOnOtherProvider(
+    provider: ApiProvider,
+    status: ApiKeyStatus,
+    lastError: String?,
+  ): Boolean {
+    if (provider == ApiProvider.GEMINI || status != ApiKeyStatus.INVALID || lastError.isNullOrBlank()) {
+      return false
+    }
+    return lastError.contains("No Gemini API keys configured", ignoreCase = true) ||
+      lastError.contains("All configured Gemini API keys", ignoreCase = true)
+  }
+
   private suspend fun updateKeys(transform: (List<ApiKeyEntry>) -> List<ApiKeyEntry>) {
     context.secureKeysDataStore.edit { prefs ->
       val current =
@@ -237,7 +273,10 @@ class SecureKeyStorage(private val context: Context) {
     return encryptBytes(plaintextBytes)
   }
 
-  private fun decodeEncryptedPayload(encoded: String): List<ApiKeyEntry> {
+  private fun decodeEncryptedPayload(
+    encoded: String,
+    sanitizeLegacyErrors: Boolean = true,
+  ): List<ApiKeyEntry> {
     return try {
       val decryptedBytes = decryptBytes(encoded) ?: return emptyList()
       val jsonArray = JSONArray(String(decryptedBytes, Charsets.UTF_8))
@@ -245,21 +284,22 @@ class SecureKeyStorage(private val context: Context) {
       for (i in 0 until jsonArray.length()) {
         val obj = jsonArray.getJSONObject(i)
         val statusName = obj.optString("status", ApiKeyStatus.ACTIVE.name)
-        val status = runCatching { ApiKeyStatus.valueOf(statusName) }.getOrDefault(ApiKeyStatus.ACTIVE)
+        val rawStatus =
+          runCatching { ApiKeyStatus.valueOf(statusName) }.getOrDefault(ApiKeyStatus.ACTIVE)
         val providerName = obj.optString("provider", ApiProvider.GEMINI.name)
         val provider =
           runCatching { ApiProvider.valueOf(providerName) }.getOrDefault(ApiProvider.GEMINI)
-        val lastErr = obj.optString("lastError", "").ifBlank { null }
-        result.add(
+        val rawLastErr = obj.optString("lastError", "").ifBlank { null }
+        val entry =
           ApiKeyEntry(
             id = obj.optString("id", UUID.randomUUID().toString()),
             key = obj.getString("key"),
             label = obj.optString("label", "Key #${i + 1}"),
-            status = status,
-            lastError = lastErr,
+            status = rawStatus,
+            lastError = rawLastErr,
             provider = provider,
           )
-        )
+        result.add(if (sanitizeLegacyErrors) healIfFalseGeminiError(entry) else entry)
       }
       result
     } catch (_: Exception) {

@@ -110,7 +110,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val apiKeys: StateFlow<List<ApiKeyEntry>> =
     keyStorage.apiKeysFlow.stateIn(
       scope = viewModelScope,
-      started = SharingStarted.WhileSubscribed(5000),
+      started = SharingStarted.Eagerly,
       initialValue = emptyList(),
     )
 
@@ -188,6 +188,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val uiMessages = _uiMessages.asSharedFlow()
 
   init {
+    viewModelScope.launch {
+      keyStorage.sanitizeFalseGeminiErrorsOnNonGeminiKeys()
+    }
     viewModelScope.launch {
       historyItems.collect { items ->
         val q = _historySearchQuery.value.trim()
@@ -546,7 +549,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   fun setApiProvider(provider: ApiProvider) {
-    viewModelScope.launch { settingsRepo.setApiProvider(provider) }
+    viewModelScope.launch {
+      keyStorage.sanitizeFalseGeminiErrorsOnNonGeminiKeys()
+      settingsRepo.setApiProvider(provider)
+    }
   }
 
   fun setDynamicBatchSizing(enabled: Boolean) {

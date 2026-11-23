@@ -20,12 +20,21 @@ import com.example.data.storage.SubtitleFileStorage
 import com.example.logging.TranslationLogger
 import com.example.service.SubtitleTranslationService
 import com.example.service.TranslationCoordinator
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class BSubApplication : Application() {
+
+  private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   override fun onCreate() {
     super.onCreate()
     TranslationLogger.init(this, isDebugBuild = BuildConfig.DEBUG)
+    applicationScope.launch {
+      secureKeyStorage.sanitizeFalseGeminiErrorsOnNonGeminiKeys()
+    }
   }
 
   val database: BSubDatabase by lazy { BSubDatabase.getInstance(this) }
