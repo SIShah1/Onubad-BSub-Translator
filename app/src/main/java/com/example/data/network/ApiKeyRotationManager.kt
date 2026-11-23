@@ -114,6 +114,17 @@ class ApiKeyRotationManager(
     rotationMutex.withLock {
       keyStorage.resetExhaustedAndCooldownKeys(provider)
       var keys = keyStorage.getKeysSnapshot(provider)
+      if (provider != ApiProvider.GEMINI) {
+        keys
+          .filter {
+            it.status == ApiKeyStatus.INVALID &&
+              it.lastError?.contains("No Gemini API keys configured", ignoreCase = true) == true
+          }
+          .forEach { affected ->
+            keyStorage.updateKeyStatus(affected.id, ApiKeyStatus.ACTIVE, null)
+          }
+        keys = keyStorage.getKeysSnapshot(provider)
+      }
       if (keys.isNotEmpty() && keys.all { it.status == ApiKeyStatus.INVALID }) {
         // Allow retry if user edited or re-enabled previously invalid keys
         keyStorage.resetAllKeyStatuses(provider)

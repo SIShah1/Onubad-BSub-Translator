@@ -42,7 +42,7 @@ class GeminiApiClient(
   customDeepSeekService: DeepSeekApiService? = null,
 ) : TranslationServiceProvider {
 
-  private val okHttpClient: OkHttpClient =
+  private val geminiOkHttpClient: OkHttpClient =
     OkHttpClient.Builder()
       .apply {
         if (keyRotationInterceptor != null) {
@@ -56,18 +56,34 @@ class GeminiApiClient(
       .callTimeout(260, TimeUnit.SECONDS)
       .build()
 
+  private val providerOkHttpClient: OkHttpClient =
+    OkHttpClient.Builder()
+      .apply {
+        extraInterceptors.forEach { addInterceptor(it) }
+      }
+      .connectTimeout(30, TimeUnit.SECONDS)
+      .readTimeout(240, TimeUnit.SECONDS)
+      .writeTimeout(60, TimeUnit.SECONDS)
+      .callTimeout(260, TimeUnit.SECONDS)
+      .build()
+
   private val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
   private val moshiConverter: MoshiConverterFactory = MoshiConverterFactory.create(moshi)
 
-  private fun buildRetrofit(baseUrl: String): Retrofit =
+  private fun buildRetrofit(
+    baseUrl: String,
+    client: OkHttpClient,
+  ): Retrofit =
     Retrofit.Builder()
       .baseUrl(baseUrl)
-      .client(okHttpClient)
+      .client(client)
       .addConverterFactory(moshiConverter)
       .build()
 
   private val apiService: GeminiApiService =
-    customService ?: buildRetrofit(GeminiApiService.BASE_URL).create(GeminiApiService::class.java)
+    customService
+      ?: buildRetrofit(GeminiApiService.BASE_URL, geminiOkHttpClient)
+        .create(GeminiApiService::class.java)
 
   private val grokApiService: GrokApiService =
     customGrokService
@@ -84,7 +100,8 @@ class GeminiApiClient(
             )
         }
       } else {
-        buildRetrofit(GrokApiService.BASE_URL).create(GrokApiService::class.java)
+        buildRetrofit(GrokApiService.BASE_URL, providerOkHttpClient)
+          .create(GrokApiService::class.java)
       }
 
   private val deepSeekApiService: DeepSeekApiService =
@@ -102,7 +119,8 @@ class GeminiApiClient(
             )
         }
       } else {
-        buildRetrofit(DeepSeekApiService.BASE_URL).create(DeepSeekApiService::class.java)
+        buildRetrofit(DeepSeekApiService.BASE_URL, providerOkHttpClient)
+          .create(DeepSeekApiService::class.java)
       }
 
   private val geminiTranslationService: TranslationService = GeminiTranslationService(apiService)

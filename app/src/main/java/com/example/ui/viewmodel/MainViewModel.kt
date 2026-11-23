@@ -331,6 +331,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         title = if (form.inputMode == InputMode.MOVIE) form.movieName else form.seriesName,
         secondaryMeta = if (form.inputMode == InputMode.MOVIE) form.releaseYear else form.season,
         files = files,
+        apiProvider = activeProvider,
       )
     coordinator.markQueued(request)
     viewModelScope.launch {

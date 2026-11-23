@@ -3147,4 +3147,95 @@ class ExampleRobolectricTest {
       assertEquals(0, app.secureKeyStorage.getKeysSnapshot(ApiProvider.GEMINI).size)
     }
   }
+
+  @Test
+  fun `grok and deepseek succeed with zero gemini keys configured when keyStorage interceptor is active`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 5)
+      app.settingsRepository.setContextLines(ParamMode.MANUAL, 0)
+      app.settingsRepository.setApiProvider(ApiProvider.GROK)
+
+      // Zero Gemini keys; Grok key initially marked INVALID by prior Gemini interceptor bug
+      app.secureKeyStorage.addSingleKey("xai-real-grok-key-1234567890", "Grok Primary", ApiProvider.GROK)
+      app.secureKeyStorage.addSingleKey("sk-real-deepseek-key-12345678", "DeepSeek Primary", ApiProvider.DEEPSEEK)
+      val grokEntry = app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).single()
+      app.secureKeyStorage.updateKeyStatus(
+        grokEntry.id,
+        ApiKeyStatus.INVALID,
+        "No Gemini API keys configured in DataStore",
+      )
+
+      val observedRequests = mutableListOf<Pair<String, String?>>()
+      val transportStub = Interceptor { chain ->
+        val req = chain.request()
+        observedRequests.add(req.url.toString() to req.header("Authorization"))
+        val jsonBody =
+          """
+          {
+            "choices": [
+              {
+                "message": {
+                  "role": "assistant",
+                  "content": "1\n00:00:01,000 --> 00:00:02,000\nসব ঠিক আছে।"
+                },
+                "finish_reason": "stop"
+              }
+            ]
+          }
+          """.trimIndent()
+        OkHttpResponse.Builder()
+          .request(req)
+          .protocol(Protocol.HTTP_1_1)
+          .code(200)
+          .message("OK")
+          .body(jsonBody.toResponseBody("application/json".toMediaType()))
+          .build()
+      }
+
+      // Real Retrofit instances with GeminiKeyRotationInterceptor wired via keyStorage (production path)
+      val prodStyleClient =
+        GeminiApiClient(
+          keyStorage = app.secureKeyStorage,
+          extraInterceptors = listOf(transportStub),
+        )
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, prodStyleClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = prodStyleClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val sampleSrt = "1\n00:00:01,000 --> 00:00:02,000\nEverything is fine."
+
+      val grokResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = sampleSrt,
+          fileName = "grok_live_path.srt",
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue("Expected Grok Success even with 0 Gemini keys, got $grokResult", grokResult is SubtitleTranslationServiceResult.Success)
+      val recoveredGrok = app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).single()
+      assertEquals(ApiKeyStatus.ACTIVE, recoveredGrok.status)
+      assertEquals(null, recoveredGrok.lastError)
+
+      app.settingsRepository.setApiProvider(ApiProvider.DEEPSEEK)
+      val deepSeekResult =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = sampleSrt,
+          fileName = "deepseek_live_path.srt",
+          onRetryDelay = { _, _ -> },
+        )
+      assertTrue("Expected DeepSeek Success even with 0 Gemini keys, got $deepSeekResult", deepSeekResult is SubtitleTranslationServiceResult.Success)
+
+      assertEquals(
+        listOf(
+          "https://api.x.ai/v1/chat/completions" to "Bearer xai-real-grok-key-1234567890",
+          "https://api.deepseek.com/chat/completions" to "Bearer sk-real-deepseek-key-12345678",
+        ),
+        observedRequests,
+      )
+    }
 }

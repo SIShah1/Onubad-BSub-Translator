@@ -68,14 +68,17 @@ class GeminiKeyRotationInterceptor(
   override fun intercept(chain: Interceptor.Chain): Response {
     val originalRequest = chain.request()
     val explicitKey = originalRequest.url.queryParameter(QUERY_KEY_PARAM)
+    val explicitAuth = originalRequest.header("Authorization")
+    val host = originalRequest.url.host.lowercase()
+    val isNonGeminiProviderHost = host.endsWith("x.ai") || host.endsWith("deepseek.com")
     val autoRotateHeader = originalRequest.header(HEADER_AUTO_ROTATE)?.equals("true", ignoreCase = true) == true
 
     // Clean internal control header before hitting network
     val baseRequest =
       originalRequest.newBuilder().removeHeader(HEADER_AUTO_ROTATE).build()
 
-    // If caller supplied an explicit key and did not request interceptor-level rotation, pass through.
-    if (!explicitKey.isNullOrBlank() && !autoRotateHeader) {
+    // Pass through Bearer-authenticated, explicit-key, or non-Gemini provider requests.
+    if ((!explicitKey.isNullOrBlank() || !explicitAuth.isNullOrBlank() || isNonGeminiProviderHost) && !autoRotateHeader) {
       return chain.proceed(baseRequest)
     }
 
