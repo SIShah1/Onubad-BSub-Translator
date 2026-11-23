@@ -475,7 +475,7 @@ fun ApiKeysScreen(
 }
 
 @Composable
-private fun ApiKeyRow(
+internal fun ApiKeyRow(
   position: Int,
   entry: ApiKeyEntry,
   enabled: Boolean,
@@ -595,7 +595,7 @@ private fun ApiKeyRow(
 }
 
 @Composable
-private fun ApiKeyEditorDialog(
+internal fun ApiKeyEditorDialog(
   title: String,
   keyFieldLabel: String,
   keyPlaceholder: String,

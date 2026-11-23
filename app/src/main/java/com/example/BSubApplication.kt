@@ -8,9 +8,12 @@ import com.example.data.local.HistoryRepository
 import com.example.data.local.SubtitleHistoryRepository
 import com.example.data.local.SubtitleTranslationRepository
 import com.example.data.network.ApiKeyRotationManager
+import com.example.data.network.DeepSeekApiService
 import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiApiService
+import com.example.data.network.GrokApiService
 import com.example.data.network.OpenAiCompatibleApiService
+import com.example.data.network.TranslationServiceProvider
 import com.example.data.preferences.SecureKeyStorage
 import com.example.data.preferences.SettingsRepository
 import com.example.data.storage.SubtitleFileStorage
@@ -45,6 +48,8 @@ class BSubApplication : Application() {
   val secureKeyStorage: SecureKeyStorage by lazy { SecureKeyStorage(this) }
   val subtitleFileStorage: SubtitleFileStorage by lazy { SubtitleFileStorage(this) }
   val geminiApiClient: GeminiApiClient by lazy { GeminiApiClient(keyStorage = secureKeyStorage) }
+  val translationServiceProvider: TranslationServiceProvider
+    get() = geminiApiClient
   val apiKeyRotationManager: ApiKeyRotationManager by lazy {
     ApiKeyRotationManager(
       keyStorage = secureKeyStorage,
@@ -88,15 +93,24 @@ class BSubApplication : Application() {
   internal fun overrideServicesForTesting(
     customService: GeminiApiService? = null,
     customChatService: OpenAiCompatibleApiService? = null,
+    customGrokService: GrokApiService? = null,
+    customDeepSeekService: DeepSeekApiService? = null,
   ) {
     coordinatorOverride =
-      if (customService == null && customChatService == null) {
+      if (
+        customService == null &&
+          customChatService == null &&
+          customGrokService == null &&
+          customDeepSeekService == null
+      ) {
         null
       } else {
         val customClient =
           GeminiApiClient(
             customService = customService,
             customChatService = customChatService,
+            customGrokService = customGrokService,
+            customDeepSeekService = customDeepSeekService,
           )
         val customRotationManager =
           ApiKeyRotationManager(

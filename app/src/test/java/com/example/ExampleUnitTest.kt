@@ -1,7 +1,13 @@
 package com.example
 
+import com.example.data.network.DeepSeekApiService
+import com.example.data.network.DeepSeekTranslationService
 import com.example.data.network.GeminiApiClient
+import com.example.data.network.GeminiApiService
 import com.example.data.network.GeminiCallResult
+import com.example.data.network.GeminiTranslationService
+import com.example.data.network.GrokApiService
+import com.example.data.network.GrokTranslationService
 import com.example.data.preferences.SecureKeyStorage
 import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
@@ -639,5 +645,26 @@ class ExampleUnitTest {
     val fixedRes = fixedSizer.recordSuccessLatency(latencyMs = 500L)
     assertEquals(150, fixedRes.newSize)
     assertEquals(150, fixedSizer.currentBatchSize)
+  }
+
+  @Test
+  fun `polymorphic translation service provider resolves dedicated retrofit configurations per engine`() {
+    val client = GeminiApiClient()
+
+    val geminiService = client.serviceFor(ApiProvider.GEMINI)
+    val grokService = client.serviceFor(ApiProvider.GROK)
+    val deepSeekService = client.serviceFor(ApiProvider.DEEPSEEK)
+
+    assertTrue(geminiService is GeminiTranslationService)
+    assertTrue(grokService is GrokTranslationService)
+    assertTrue(deepSeekService is DeepSeekTranslationService)
+
+    assertEquals(ApiProvider.GEMINI, geminiService.provider)
+    assertEquals(ApiProvider.GROK, grokService.provider)
+    assertEquals(ApiProvider.DEEPSEEK, deepSeekService.provider)
+
+    assertEquals(GeminiApiService.BASE_URL, geminiService.baseUrl)
+    assertEquals(GrokApiService.BASE_URL, grokService.baseUrl)
+    assertEquals(DeepSeekApiService.BASE_URL, deepSeekService.baseUrl)
   }
 }

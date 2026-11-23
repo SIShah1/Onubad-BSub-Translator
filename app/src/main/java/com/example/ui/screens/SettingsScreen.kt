@@ -62,7 +62,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.domain.model.ApiProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DefaultConfig
 import com.example.domain.model.FewShotExample
@@ -75,6 +75,7 @@ import com.example.ui.components.ContextAwareTranslationCard
 import com.example.ui.components.ParamModeHeader
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StudioSectionCard
+import com.example.ui.components.UnifiedApiConfigCard
 import com.example.ui.theme.BSubShape
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalThemeController
@@ -89,6 +90,8 @@ fun SettingsScreen(
 ) {
   var editingExample by remember { mutableStateOf<FewShotExample?>(null) }
   var showAddExampleDialog by remember { mutableStateOf(false) }
+  val apiKeys by viewModel.apiKeys.collectAsStateWithLifecycle()
+  val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
   val themeController = LocalThemeController.current
   val activeModeLabel =
     when (themeController.themeMode) {
@@ -175,7 +178,22 @@ fun SettingsScreen(
       }
     }
 
-    // 2. Prompt Settings
+    // 2. Unified API Configuration & Primary Engine
+    UnifiedApiConfigCard(
+      settings = settings,
+      apiKeys = apiKeys,
+      isTranslationRunning = sessionState.isRunningOrCooldown,
+      onSetActiveProvider = viewModel::setApiProvider,
+      onSaveBulkKeys = viewModel::saveBulkApiKeys,
+      onImportKeysFile = viewModel::importApiKeysFromUri,
+      onAddSingleKey = viewModel::addSingleApiKey,
+      onEditKey = viewModel::editApiKey,
+      onRemoveKey = viewModel::removeApiKey,
+      onClearAllKeys = viewModel::clearAllApiKeys,
+      onResetAllStatuses = viewModel::resetAllKeyStatuses,
+    )
+
+    // 3. Prompt Settings
     PromptSettingsCard(
       settings = settings,
       onPromptModeChange = viewModel::setPromptMode,
@@ -562,38 +580,7 @@ private fun AdvancedSettingsCard(
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     Spacer(modifier = Modifier.height(12.dp))
 
-    // 2. API Provider & Model
-    Text(
-      text = "AI Provider",
-      style = MaterialTheme.typography.titleSmall,
-      color = MaterialTheme.colorScheme.onSurface,
-    )
-    Spacer(modifier = Modifier.height(8.dp))
-    val providerSegmentedColors =
-      SegmentedButtonDefaults.colors(
-        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
-        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        inactiveContainerColor = MaterialTheme.colorScheme.surface,
-        inactiveContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-        activeBorderColor = MaterialTheme.colorScheme.outlineVariant,
-        inactiveBorderColor = MaterialTheme.colorScheme.outlineVariant,
-      )
-    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-      ApiProvider.entries.forEachIndexed { index, provider ->
-        SegmentedButton(
-          selected = settings.apiProvider == provider,
-          onClick = { viewModel.setApiProvider(provider) },
-          shape = SegmentedButtonDefaults.itemShape(index = index, count = ApiProvider.entries.size),
-          colors = providerSegmentedColors,
-          modifier = Modifier.testTag("settings_provider_${provider.name.lowercase()}"),
-        ) {
-          Text(provider.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-      }
-    }
-
-    Spacer(modifier = Modifier.height(12.dp))
-
+    // 2. AI Model (for active engine selected above)
     val defaultModelForProvider = DefaultConfig.defaultModelFor(settings.apiProvider)
     val presetModelsForProvider = DefaultConfig.presetModelsFor(settings.apiProvider)
 

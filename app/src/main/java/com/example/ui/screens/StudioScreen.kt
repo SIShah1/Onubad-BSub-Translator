@@ -29,10 +29,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Movie
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Preview
@@ -80,7 +80,7 @@ import com.example.data.local.FileTranslationProgress
 import com.example.data.local.RoomTranslationProgress
 import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.ApiKeyEntry
-import com.example.domain.model.ApiKeyStatus
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.AppSettings
 import com.example.domain.model.InputMode
 import com.example.domain.model.SelectedSubtitleFile
@@ -89,7 +89,6 @@ import com.example.srt.SrtEngine
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StudioSectionCard
 import com.example.ui.theme.BSubShape
-import com.example.ui.theme.CloverCoral
 import com.example.ui.theme.CloverEmerald
 import com.example.ui.theme.CloverHeroDark
 import com.example.ui.theme.CloverMintInk
@@ -107,7 +106,7 @@ import kotlin.math.ceil
 fun StudioScreen(
   formState: StudioFormState,
   settings: AppSettings,
-  apiKeys: List<ApiKeyEntry>,
+  apiKeys: List<ApiKeyEntry> = emptyList(),
   sessionState: TranslationSessionState,
   roomProgress: RoomTranslationProgress = RoomTranslationProgress(),
   fileProgressList: List<FileTranslationProgress> = emptyList(),
@@ -128,7 +127,8 @@ fun StudioScreen(
   onImportBulkKeys: (String) -> Unit = {},
   onImportKeysFile: (Uri?) -> Unit = {},
   onPreviewFile: (String, SelectedSubtitleFile?) -> Unit = { _, _ -> },
-  onNavigateToKeys: () -> Unit,
+  onNavigateToKeys: () -> Unit = {},
+  onNavigateToEngineSettings: (() -> Unit)? = null,
   modifier: Modifier = Modifier,
 ) {
   val context = LocalContext.current
@@ -149,8 +149,6 @@ fun StudioScreen(
     }
 
   val isRunning = sessionState.isRunningOrCooldown
-  val providerKeys = apiKeys.filter { it.provider == settings.apiProvider }
-  val activeKeysCount = providerKeys.count { it.status == ApiKeyStatus.ACTIVE }
 
   Column(
     modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -158,13 +156,12 @@ fun StudioScreen(
   ) {
     // 1. Studio Atmospheric Banner Header
     StudioHeroBanner(
+      activeProvider = settings.apiProvider,
       modelName = settings.effectiveModel,
       chunkSize =
         if (isRunning && sessionState.currentBatchSize > 0) sessionState.currentBatchSize
         else settings.effectiveChunkSize,
-      totalKeysCount = providerKeys.size,
-      activeKeysCount = activeKeysCount,
-      onNavigateToKeys = onNavigateToKeys,
+      onEngineBadgeClick = onNavigateToEngineSettings ?: onNavigateToKeys,
     )
 
     // 2. Mode Switcher (Movie / Series) + Metadata + File Picker
@@ -446,18 +443,14 @@ fun StudioScreen(
 
 @Composable
 private fun StudioHeroBanner(
+  activeProvider: ApiProvider,
   modelName: String,
   chunkSize: Int,
-  totalKeysCount: Int,
-  activeKeysCount: Int,
-  onNavigateToKeys: () -> Unit,
+  onEngineBadgeClick: () -> Unit,
 ) {
   val themeController = LocalThemeController.current
   val isDark = themeController.isDarkTheme
-  val hasActiveKeys = totalKeysCount > 0 && activeKeysCount > 0
   val heroColor = if (isDark) CloverHeroDark else CloverEmerald
-  val keysContainerColor = if (hasActiveKeys) CloverMintSoft else CloverCoral
-  val keysContentColor = if (hasActiveKeys) CloverMintInk else Color(0xFF420D08)
 
   Surface(
     modifier = Modifier.fillMaxWidth().height(106.dp).testTag("hero_banner"),
@@ -618,17 +611,18 @@ private fun StudioHeroBanner(
         ) {
           Surface(
             shape = pillShape,
-            color = keysContainerColor,
+            color = CloverMintSoft,
             modifier =
               Modifier.weight(1f)
                 .fillMaxWidth()
                 .clip(pillShape)
+                .semantics(mergeDescendants = true) {}
                 .clickable(
                   role = Role.Button,
-                  onClickLabel = "Manage API Keys",
-                  onClick = onNavigateToKeys,
+                  onClickLabel = "Configure Active Engine",
+                  onClick = onEngineBadgeClick,
                 )
-                .testTag("hero_keys_chip"),
+                .testTag("hero_engine_chip"),
           ) {
             Row(
               modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
@@ -636,18 +630,16 @@ private fun StudioHeroBanner(
               verticalAlignment = Alignment.CenterVertically,
             ) {
               Icon(
-                imageVector = Icons.Rounded.Key,
-                contentDescription = "API Keys",
-                tint = keysContentColor,
+                imageVector = Icons.Rounded.Bolt,
+                contentDescription = "Active Engine",
+                tint = CloverMintInk,
                 modifier = Modifier.size(12.dp),
               )
-              Spacer(modifier = Modifier.width(5.dp))
+              Spacer(modifier = Modifier.width(4.dp))
               Text(
-                text =
-                  if (totalKeysCount == 0) "0 Keys"
-                  else "$activeKeysCount/$totalKeysCount Keys",
+                text = "Engine: ${activeProvider.displayName}",
                 style = pillTextStyle.copy(fontWeight = FontWeight.SemiBold),
-                color = keysContentColor,
+                color = CloverMintInk,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
               )

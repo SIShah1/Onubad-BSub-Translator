@@ -6,17 +6,11 @@ import com.example.domain.model.FewShotExample
 import com.example.domain.model.InputMode
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
-import java.io.IOException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import org.json.JSONObject
-import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 
@@ -34,13 +28,19 @@ sealed class GeminiCallResult {
   data class FatalError(val reason: String, val httpCode: Int) : GeminiCallResult()
 }
 
+/**
+ * Multi-provider network client implementing [TranslationServiceProvider] with independent
+ * Retrofit configurations for Gemini, Grok, and DeepSeek.
+ */
 class GeminiApiClient(
   customService: GeminiApiService? = null,
   keyStorage: SecureKeyStorage? = null,
   keyRotationInterceptor: Interceptor? = keyStorage?.let { GeminiKeyRotationInterceptor(it) },
   extraInterceptors: List<Interceptor> = emptyList(),
   customChatService: OpenAiCompatibleApiService? = null,
-) {
+  customGrokService: GrokApiService? = null,
+  customDeepSeekService: DeepSeekApiService? = null,
+) : TranslationServiceProvider {
 
   private val okHttpClient: OkHttpClient =
     OkHttpClient.Builder()
@@ -57,24 +57,65 @@ class GeminiApiClient(
       .build()
 
   private val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
+  private val moshiConverter: MoshiConverterFactory = MoshiConverterFactory.create(moshi)
+
+  private fun buildRetrofit(baseUrl: String): Retrofit =
+    Retrofit.Builder()
+      .baseUrl(baseUrl)
+      .client(okHttpClient)
+      .addConverterFactory(moshiConverter)
+      .build()
 
   private val apiService: GeminiApiService =
-    customService
-      ?: Retrofit.Builder()
-        .baseUrl(GeminiApiService.BASE_URL)
-        .client(okHttpClient)
-        .addConverterFactory(MoshiConverterFactory.create(moshi))
-        .build()
-        .create(GeminiApiService::class.java)
+    customService ?: buildRetrofit(GeminiApiService.BASE_URL).create(GeminiApiService::class.java)
 
-  private val chatApiService: OpenAiCompatibleApiService =
-    customChatService
-      ?: Retrofit.Builder()
-        .baseUrl(OpenAiCompatibleApiService.GROK_BASE_URL)
-        .client(okHttpClient)
-        .addConverterFactory(MoshiConverterFactory.create(moshi))
-        .build()
-        .create(OpenAiCompatibleApiService::class.java)
+  private val grokApiService: GrokApiService =
+    customGrokService
+      ?: if (customChatService != null) {
+        object : GrokApiService {
+          override suspend fun createChatCompletion(
+            authorization: String,
+            request: ChatCompletionRequest,
+          ) =
+            customChatService.createChatCompletion(
+              url = OpenAiCompatibleApiService.GROK_URL,
+              authorization = authorization,
+              request = request,
+            )
+        }
+      } else {
+        buildRetrofit(GrokApiService.BASE_URL).create(GrokApiService::class.java)
+      }
+
+  private val deepSeekApiService: DeepSeekApiService =
+    customDeepSeekService
+      ?: if (customChatService != null) {
+        object : DeepSeekApiService {
+          override suspend fun createChatCompletion(
+            authorization: String,
+            request: ChatCompletionRequest,
+          ) =
+            customChatService.createChatCompletion(
+              url = OpenAiCompatibleApiService.DEEPSEEK_URL,
+              authorization = authorization,
+              request = request,
+            )
+        }
+      } else {
+        buildRetrofit(DeepSeekApiService.BASE_URL).create(DeepSeekApiService::class.java)
+      }
+
+  private val geminiTranslationService: TranslationService = GeminiTranslationService(apiService)
+  private val grokTranslationService: TranslationService = GrokTranslationService(grokApiService)
+  private val deepSeekTranslationService: TranslationService =
+    DeepSeekTranslationService(deepSeekApiService)
+
+  override fun serviceFor(provider: ApiProvider): TranslationService =
+    when (provider) {
+      ApiProvider.GEMINI -> geminiTranslationService
+      ApiProvider.GROK -> grokTranslationService
+      ApiProvider.DEEPSEEK -> deepSeekTranslationService
+    }
 
   suspend fun translateBatch(
     apiKey: String,
@@ -93,11 +134,14 @@ class GeminiApiClient(
     surroundingContext: String = "",
     provider: ApiProvider = ApiProvider.GEMINI,
   ): GeminiCallResult =
-    withContext(Dispatchers.IO) {
-      if (provider != ApiProvider.GEMINI) {
-        val chatRequest =
-          buildChatCompletionRequest(
-            model = model.trim(),
+    serviceFor(provider)
+      .translateBatch(
+        apiKey = apiKey,
+        request =
+          TranslationRequest(
+            model = model,
+            temperature = temperature,
+            thinkingBudget = thinkingBudget,
             systemPrompt = systemPrompt,
             fewShotExamples = fewShotExamples,
             inputMode = inputMode,
@@ -107,99 +151,9 @@ class GeminiApiClient(
             batchIndex = batchIndex,
             totalBatches = totalBatches,
             fileName = fileName,
-            temperature = temperature,
             surroundingContext = surroundingContext,
-          )
-        val endpointUrl =
-          when (provider) {
-            ApiProvider.GROK -> OpenAiCompatibleApiService.GROK_URL
-            ApiProvider.DEEPSEEK -> OpenAiCompatibleApiService.DEEPSEEK_URL
-            ApiProvider.GEMINI -> OpenAiCompatibleApiService.GROK_URL
-          }
-        return@withContext try {
-          val response =
-            chatApiService.createChatCompletion(
-              url = endpointUrl,
-              authorization = "Bearer ${apiKey.trim()}",
-              request = chatRequest,
-            )
-          if (response.isSuccessful) {
-            val extracted = extractChatCompletionText(response.body())
-            if (extracted.isNullOrBlank()) {
-              GeminiCallResult.RetryableError(
-                reason = "Empty response returned by ${provider.displayName} API",
-                httpCode = response.code(),
-              )
-            } else {
-              GeminiCallResult.Success(extracted)
-            }
-          } else {
-            val errorPayload = response.errorBody()?.string().orEmpty()
-            classifyHttpFailure(response.code(), errorPayload)
-          }
-        } catch (cancel: CancellationException) {
-          throw cancel
-        } catch (e: SocketTimeoutException) {
-          GeminiCallResult.RetryableError("Network timeout: ${e.message ?: "Request timed out"}")
-        } catch (e: UnknownHostException) {
-          GeminiCallResult.RetryableError("Network error: Unable to reach ${provider.displayName} API")
-        } catch (e: IOException) {
-          GeminiCallResult.RetryableError("Network error: ${e.message ?: "Connection failed"}")
-        } catch (e: Exception) {
-          GeminiCallResult.RetryableError("Unexpected error: ${e.message ?: "Unknown failure"}")
-        }
-      }
-
-      val cleanModel = model.trim().removePrefix("models/")
-      val requestBody =
-        buildRequestBody(
-          systemPrompt = systemPrompt,
-          fewShotExamples = fewShotExamples,
-          inputMode = inputMode,
-          title = title,
-          secondaryMeta = secondaryMeta,
-          batchSrtPayload = batchSrtPayload,
-          batchIndex = batchIndex,
-          totalBatches = totalBatches,
-          fileName = fileName,
-          temperature = temperature,
-          thinkingBudget = thinkingBudget,
-          surroundingContext = surroundingContext,
-        )
-
-      try {
-        val response =
-          apiService.generateContent(
-            model = cleanModel,
-            apiKey = apiKey,
-            request = requestBody,
-          )
-        if (response.isSuccessful) {
-          val extracted = extractCandidateText(response.body())
-          if (extracted.isNullOrBlank()) {
-            GeminiCallResult.RetryableError(
-              reason = "Empty response returned by Gemini API",
-              httpCode = response.code(),
-            )
-          } else {
-            GeminiCallResult.Success(extracted)
-          }
-        } else {
-          val errorPayload = response.errorBody()?.string().orEmpty()
-          classifyHttpFailure(response.code(), errorPayload)
-        }
-      } catch (cancel: CancellationException) {
-        throw cancel
-      } catch (e: SocketTimeoutException) {
-        GeminiCallResult.RetryableError("Network timeout: ${e.message ?: "Request timed out"}")
-      } catch (e: UnknownHostException) {
-        GeminiCallResult.RetryableError("Network error: Unable to reach Gemini API")
-      } catch (e: IOException) {
-        GeminiCallResult.RetryableError("Network error: ${e.message ?: "Connection failed"}")
-      } catch (e: Exception) {
-        GeminiCallResult.RetryableError("Unexpected error: ${e.message ?: "Unknown failure"}")
-      }
-    }
+          ),
+      )
 
   suspend fun translateBatchWithInterceptorRotation(
     model: String,
@@ -233,45 +187,15 @@ class GeminiApiClient(
           thinkingBudget = thinkingBudget,
           surroundingContext = surroundingContext,
         )
-      executeGeminiCall {
-        apiService.generateContentWithKeyRotation(
-          model = cleanModel,
-          request = requestBody,
-        )
-      }
-    }
-
-  private suspend inline fun executeGeminiCall(
-    call: () -> Response<GeminiGenerateContentResponse>
-  ): GeminiCallResult {
-    return try {
-      val response = call()
-      if (response.isSuccessful) {
-        val extracted = extractCandidateText(response.body())
-        if (extracted.isNullOrBlank()) {
-          GeminiCallResult.RetryableError(
-            reason = "Empty response returned by Gemini API",
-            httpCode = response.code(),
+      TranslationProtocolMapper.executeCall(providerName = ApiProvider.GEMINI.displayName) {
+        val response =
+          apiService.generateContentWithKeyRotation(
+            model = cleanModel,
+            request = requestBody,
           )
-        } else {
-          GeminiCallResult.Success(extracted)
-        }
-      } else {
-        val errorPayload = response.errorBody()?.string().orEmpty()
-        classifyHttpFailure(response.code(), errorPayload)
+        TranslationProtocolMapper.handleGeminiResponse(response)
       }
-    } catch (cancel: CancellationException) {
-      throw cancel
-    } catch (e: SocketTimeoutException) {
-      GeminiCallResult.RetryableError("Network timeout: ${e.message ?: "Request timed out"}")
-    } catch (e: UnknownHostException) {
-      GeminiCallResult.RetryableError("Network error: Unable to reach Gemini API")
-    } catch (e: IOException) {
-      GeminiCallResult.RetryableError("Network error: ${e.message ?: "Connection failed"}")
-    } catch (e: Exception) {
-      GeminiCallResult.RetryableError("Unexpected error: ${e.message ?: "Unknown failure"}")
     }
-  }
 
   internal fun buildRequestBody(
     systemPrompt: String,
@@ -286,108 +210,21 @@ class GeminiApiClient(
     temperature: Float,
     thinkingBudget: Int,
     surroundingContext: String = "",
-  ): GeminiGenerateContentRequest {
-    val contextHeader =
-      buildString {
-        appendLine(systemPrompt.trim())
-        appendLine()
-        appendLine("MEDIA CONTEXT:")
-        when (inputMode) {
-          InputMode.MOVIE -> {
-            appendLine("- Type: Movie")
-            if (title.isNotBlank()) appendLine("- Movie Name: ${title.trim()}")
-            if (secondaryMeta.isNotBlank()) appendLine("- Release Year: ${secondaryMeta.trim()}")
-          }
-          InputMode.SERIES -> {
-            appendLine("- Type: TV Series")
-            if (title.isNotBlank()) appendLine("- Series Name: ${title.trim()}")
-            if (secondaryMeta.isNotBlank()) appendLine("- Season: ${secondaryMeta.trim()}")
-          }
-        }
-        appendLine("- Source File: $fileName (Batch $batchIndex of $totalBatches)")
-      }.trim()
-
-    val contentsList = ArrayList<GeminiContent>()
-
-    // Add configured few-shot examples as alternating user/model demonstration turns
-    fewShotExamples
-      .filter { it.englishText.isNotBlank() && it.bengaliTranslation.isNotBlank() }
-      .forEachIndexed { idx, ex ->
-        val notePrefix = if (ex.note.isNotBlank()) "[Style note: ${ex.note.trim()}]\n" else ""
-        val userTurnText =
-          "Example ${idx + 1} - Translate into Bengali following the exact style and SRT structure:\n$notePrefix${ex.englishText.trim()}"
-        contentsList.add(
-          GeminiContent(
-            role = "user",
-            parts = listOf(GeminiPart(text = userTurnText)),
-          )
-        )
-        contentsList.add(
-          GeminiContent(
-            role = "model",
-            parts = listOf(GeminiPart(text = ex.bengaliTranslation.trim())),
-          )
-        )
-      }
-
-    // Add surrounding dialogue context (reference only) before the target batch turn
-    val cleanSurroundingContext = surroundingContext.trim()
-    if (cleanSurroundingContext.isNotEmpty()) {
-      val contextTurnText =
-        """
-SURROUNDING DIALOGUE CONTEXT (REFERENCE ONLY — DO NOT TRANSLATE OR OUTPUT THESE LINES):
-Use these surrounding lines strictly to preserve dialogue coherence, pronoun formality (আপনি / তুমি / তুই), and consistent character voices.
-
-$cleanSurroundingContext
-        """.trimIndent()
-      contentsList.add(
-        GeminiContent(
-          role = "user",
-          parts = listOf(GeminiPart(text = contextTurnText)),
-        )
-      )
-      contentsList.add(
-        GeminiContent(
-          role = "model",
-          parts =
-            listOf(
-              GeminiPart(
-                text =
-                  "Understood. I will use the surrounding dialogue only for context and character-voice consistency, and I will translate and output ONLY the exact SRT blocks in the next message."
-              )
-            ),
-        )
-      )
-    }
-
-    // Final user turn with the actual SRT batch to translate
-    val batchInstruction =
-      """
-Translate every subtitle block below from English to Bengali.
-Return ONLY the translated .srt blocks with identical serial numbers and identical timestamps.
-
-$batchSrtPayload
-      """.trimIndent()
-
-    contentsList.add(
-      GeminiContent(
-        role = "user",
-        parts = listOf(GeminiPart(text = batchInstruction)),
-      )
+  ): GeminiGenerateContentRequest =
+    TranslationProtocolMapper.buildGeminiRequestBody(
+      systemPrompt = systemPrompt,
+      fewShotExamples = fewShotExamples,
+      inputMode = inputMode,
+      title = title,
+      secondaryMeta = secondaryMeta,
+      batchSrtPayload = batchSrtPayload,
+      batchIndex = batchIndex,
+      totalBatches = totalBatches,
+      fileName = fileName,
+      temperature = temperature,
+      thinkingBudget = thinkingBudget,
+      surroundingContext = surroundingContext,
     )
-
-    val generationConfig =
-      GeminiGenerationConfig(
-        temperature = temperature.toDouble(),
-        thinkingConfig = if (thinkingBudget > 0) GeminiThinkingConfig(thinkingBudget) else null,
-      )
-
-    return GeminiGenerateContentRequest(
-      systemInstruction = GeminiContent(parts = listOf(GeminiPart(text = contextHeader))),
-      contents = contentsList,
-      generationConfig = generationConfig,
-    )
-  }
 
   internal fun buildChatCompletionRequest(
     model: String,
@@ -402,182 +239,22 @@ $batchSrtPayload
     fileName: String,
     temperature: Float,
     surroundingContext: String = "",
-  ): ChatCompletionRequest {
-    val geminiReq =
-      buildRequestBody(
-        systemPrompt = systemPrompt,
-        fewShotExamples = fewShotExamples,
-        inputMode = inputMode,
-        title = title,
-        secondaryMeta = secondaryMeta,
-        batchSrtPayload = batchSrtPayload,
-        batchIndex = batchIndex,
-        totalBatches = totalBatches,
-        fileName = fileName,
-        temperature = temperature,
-        thinkingBudget = 0,
-        surroundingContext = surroundingContext,
-      )
-
-    val messages = ArrayList<ChatMessageDto>()
-    val systemText =
-      geminiReq.systemInstruction?.parts?.joinToString("\n") { it.text.orEmpty() }?.trim().orEmpty()
-    if (systemText.isNotEmpty()) {
-      messages.add(ChatMessageDto(role = "system", content = systemText))
-    }
-
-    geminiReq.contents.forEach { content ->
-      val role = if (content.role == "model") "assistant" else (content.role ?: "user")
-      val text = content.parts.joinToString("\n") { it.text.orEmpty() }.trim()
-      if (text.isNotEmpty()) {
-        messages.add(ChatMessageDto(role = role, content = text))
-      }
-    }
-
-    return ChatCompletionRequest(
-      model = model.trim(),
-      messages = messages,
-      temperature = temperature.toDouble(),
+  ): ChatCompletionRequest =
+    TranslationProtocolMapper.buildChatCompletionRequest(
+      model = model,
+      systemPrompt = systemPrompt,
+      fewShotExamples = fewShotExamples,
+      inputMode = inputMode,
+      title = title,
+      secondaryMeta = secondaryMeta,
+      batchSrtPayload = batchSrtPayload,
+      batchIndex = batchIndex,
+      totalBatches = totalBatches,
+      fileName = fileName,
+      temperature = temperature,
+      surroundingContext = surroundingContext,
     )
-  }
 
-  private fun extractChatCompletionText(response: ChatCompletionResponse?): String? {
-    val raw = response?.choices?.firstOrNull()?.message?.content?.trim().orEmpty()
-    if (raw.isBlank()) return null
-    val cleaned = raw.replace(Regex("(?s)<think>.*?</think>"), "").trim()
-    return cleaned.ifBlank { null }
-  }
-
-  private fun extractCandidateText(response: GeminiGenerateContentResponse?): String? {
-    val parts = response?.candidates?.firstOrNull()?.content?.parts ?: return null
-    val sb = StringBuilder()
-    for (part in parts) {
-      if (part.thought == true) continue
-      val text = part.text.orEmpty()
-      if (text.isNotEmpty()) {
-        if (sb.isNotEmpty()) sb.append('\n')
-        sb.append(text)
-      }
-    }
-    return sb.toString().trim().ifBlank { null }
-  }
-
-  internal fun classifyHttpFailure(code: Int, rawBody: String): GeminiCallResult {
-    val parsedMsg =
-      try {
-        JSONObject(rawBody).optJSONObject("error")?.optString("message").orEmpty()
-      } catch (_: Exception) {
-        ""
-      }
-    val parsedStatus =
-      try {
-        val err = JSONObject(rawBody).optJSONObject("error")
-        err?.optString("status").orEmpty().ifBlank { err?.optString("type").orEmpty() }
-      } catch (_: Exception) {
-        ""
-      }
-
-    val combinedLower = "$parsedStatus $parsedMsg $rawBody".lowercase()
-
-    // Invalid / unauthorized API key
-    if (
-      code == 401 ||
-        combinedLower.contains("api_key_invalid") ||
-        combinedLower.contains("invalid_api_key") ||
-        combinedLower.contains("api key not valid") ||
-        combinedLower.contains("invalid api key") ||
-        combinedLower.contains("incorrect api key") ||
-        combinedLower.contains("authentication_error") ||
-        combinedLower.contains("permission_denied") ||
-        (code == 400 && combinedLower.contains("api key"))
-    ) {
-      return GeminiCallResult.InvalidKey(
-        parsedMsg.ifBlank { "Invalid API key (HTTP $code)" }
-      )
-    }
-
-    // Payment required / insufficient balance (e.g. DeepSeek HTTP 402)
-    if (
-      code == 402 ||
-        combinedLower.contains("insufficient balance") ||
-        combinedLower.contains("insufficient_quota")
-    ) {
-      return GeminiCallResult.QuotaExhausted(
-        parsedMsg.ifBlank { "API account balance or quota exhausted (HTTP $code)" }
-      )
-    }
-
-    // Non-retryable client/model configuration errors (avoid burning retries or 30m cooldown loops)
-    if (code == 404 || (code == 400 && !combinedLower.contains("api key"))) {
-      val cleanReason =
-        parsedMsg.ifBlank {
-          if (code == 404) "Model not found (HTTP 404)" else "Invalid request payload (HTTP 400)"
-        }
-      return GeminiCallResult.FatalError(reason = cleanReason, httpCode = code)
-    }
-
-    // Distinguish temporary per-minute RPM/TPM 429s from daily quota exhaustion
-    val isPerMinuteRateLimit =
-      combinedLower.contains("perminute") ||
-        combinedLower.contains("per_minute") ||
-        combinedLower.contains("per minute") ||
-        combinedLower.contains("tokenspermin") ||
-        combinedLower.contains("requestspermin") ||
-        (combinedLower.contains("rate limit") && !combinedLower.contains("perday") && !combinedLower.contains("daily"))
-
-    val isDailyQuota =
-      combinedLower.contains("perday") ||
-        combinedLower.contains("per_day") ||
-        combinedLower.contains("daily") ||
-        combinedLower.contains("requestsperday") ||
-        (!isPerMinuteRateLimit &&
-          (combinedLower.contains("quota") ||
-            combinedLower.contains("resource_exhausted") ||
-            combinedLower.contains("limit")))
-
-    if (code == 429) {
-      return if (isDailyQuota) {
-        GeminiCallResult.QuotaExhausted(
-          parsedMsg.ifBlank { "Daily API quota exhausted (HTTP 429)" }
-        )
-      } else {
-        GeminiCallResult.RateLimited(
-          parsedMsg.ifBlank { "Rate limit exceeded (HTTP 429)" }
-        )
-      }
-    }
-
-    if (code == 403) {
-      return if (
-        combinedLower.contains("quota") ||
-          combinedLower.contains("billing") ||
-          combinedLower.contains("credit") ||
-          combinedLower.contains("balance") ||
-          combinedLower.contains("limit")
-      ) {
-        GeminiCallResult.QuotaExhausted(
-          parsedMsg.ifBlank { "API quota or billing limit exceeded (HTTP 403)" }
-        )
-      } else {
-        GeminiCallResult.FatalError(
-          reason = parsedMsg.ifBlank { "Access forbidden (HTTP 403)" },
-          httpCode = code,
-        )
-      }
-    }
-
-    // Server busy / transient 5xx / timeout
-    return when (code) {
-      500, 502, 503, 504, 408 ->
-        GeminiCallResult.RetryableError(
-          "Server busy (HTTP $code): ${parsedMsg.take(120)}".trim(),
-          code,
-        )
-      else ->
-        GeminiCallResult.RetryableError(
-          "API error (HTTP $code): ${parsedMsg.ifBlank { rawBody.take(120) }}",
-          code,
-        )
-    }
-  }
+  internal fun classifyHttpFailure(code: Int, rawBody: String): GeminiCallResult =
+    TranslationProtocolMapper.classifyHttpFailure(code, rawBody)
 }

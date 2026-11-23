@@ -32,6 +32,32 @@ data class ChatChoiceDto(
   @Json(name = "finish_reason") val finishReason: String? = null,
 )
 
+interface GrokApiService {
+
+  @POST("v1/chat/completions")
+  suspend fun createChatCompletion(
+    @Header("Authorization") authorization: String,
+    @Body request: ChatCompletionRequest,
+  ): Response<ChatCompletionResponse>
+
+  companion object {
+    const val BASE_URL = "https://api.x.ai/"
+  }
+}
+
+interface DeepSeekApiService {
+
+  @POST("chat/completions")
+  suspend fun createChatCompletion(
+    @Header("Authorization") authorization: String,
+    @Body request: ChatCompletionRequest,
+  ): Response<ChatCompletionResponse>
+
+  companion object {
+    const val BASE_URL = "https://api.deepseek.com/"
+  }
+}
+
 interface OpenAiCompatibleApiService {
 
   @POST
@@ -44,6 +70,7 @@ interface OpenAiCompatibleApiService {
   companion object {
     const val GROK_BASE_URL = "https://api.x.ai/"
     const val GROK_URL = "https://api.x.ai/v1/chat/completions"
+    const val DEEPSEEK_BASE_URL = "https://api.deepseek.com/"
     const val DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
   }
 }

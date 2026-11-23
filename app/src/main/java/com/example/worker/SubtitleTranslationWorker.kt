@@ -23,6 +23,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.data.local.HistoryTranslationStatus
 import com.example.data.local.TranslationHistoryEntity
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.InputMode
 import com.example.domain.model.SelectedSubtitleFile
 import com.example.domain.model.TranslationJobRequest
@@ -343,6 +344,11 @@ class SubtitleTranslationWorker(
 
         val mode =
           runCatching { InputMode.valueOf(manifest.inputMode) }.getOrDefault(InputMode.MOVIE)
+        val explicitProviderName =
+          inputData.getString(KEY_API_PROVIDER)?.takeIf { it.isNotBlank() }
+            ?: manifest.apiProvider?.takeIf { it.isNotBlank() }
+        val explicitProvider =
+          explicitProviderName?.let { name -> runCatching { ApiProvider.valueOf(name) }.getOrNull() }
         return@withContext LoadedJobPayload(
           manifestFile = manifestFile,
           cachedSrtFiles = cachedFiles,
@@ -353,6 +359,7 @@ class SubtitleTranslationWorker(
               secondaryMeta = manifest.secondaryMeta,
               files = parsedFiles,
               preSeededJobIds = preSeededJobIds,
+              apiProvider = explicitProvider,
             ),
         )
       }
@@ -409,6 +416,10 @@ class SubtitleTranslationWorker(
 
       val modeName = inputData.getString(KEY_INPUT_MODE) ?: InputMode.MOVIE.name
       val mode = runCatching { InputMode.valueOf(modeName) }.getOrDefault(InputMode.MOVIE)
+      val explicitProvider =
+        inputData.getString(KEY_API_PROVIDER)?.takeIf { it.isNotBlank() }?.let { name ->
+          runCatching { ApiProvider.valueOf(name) }.getOrNull()
+        }
 
       LoadedJobPayload(
         manifestFile = null,
@@ -431,6 +442,7 @@ class SubtitleTranslationWorker(
                 )
               ),
             preSeededJobIds = mapOf(fileId to roomJobId),
+            apiProvider = explicitProvider,
           ),
       )
     }
@@ -640,6 +652,7 @@ class SubtitleTranslationWorker(
     const val KEY_SECONDARY_META = "secondary_meta"
     const val KEY_ROOM_JOB_ID = "room_job_id"
     const val KEY_ROOM_JOB_IDS = "room_job_ids"
+    const val KEY_API_PROVIDER = "api_provider"
 
     const val KEY_PROGRESS_PERCENT = "progress_percent"
     const val KEY_COMPLETED_BLOCKS = "completed_blocks"

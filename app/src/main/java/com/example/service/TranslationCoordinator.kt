@@ -231,7 +231,10 @@ class TranslationCoordinator(
     request: TranslationJobRequest,
     workId: String? = null,
   ) {
-    val settings = settingsRepository.getSettingsSnapshot()
+    val baseSettings = settingsRepository.getSettingsSnapshot()
+    val settings =
+      if (request.apiProvider != null) baseSettings.copy(apiProvider = request.apiProvider)
+      else baseSettings
     val rotationSession = keyRotationManager.prepareSession(settings.apiProvider)
     val allKeys = rotationSession.keys
 

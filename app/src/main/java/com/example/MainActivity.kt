@@ -280,6 +280,7 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 onClearLogs = viewModel::clearProcessingLogs,
                 onPreviewFile = viewModel::openStudioFilePreview,
                 onNavigateToKeys = { navigateToTab(AppDestination.KEYS.route) },
+                onNavigateToEngineSettings = { navigateToTab(AppDestination.SETTINGS.route) },
               )
             }
 

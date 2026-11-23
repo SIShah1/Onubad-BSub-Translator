@@ -96,6 +96,7 @@ class ApiKeyRotationManager(
   private val keyStorage: SecureKeyStorage,
   private val geminiApiClient: GeminiApiClient,
   private val apiUsageRepository: ApiUsageRepository? = null,
+  private val translationServiceProvider: TranslationServiceProvider = geminiApiClient,
 ) {
 
   companion object {
@@ -327,23 +328,26 @@ class ApiKeyRotationManager(
         onAttemptStarted(keyNum, activeKey.label, attempt, safeMaxAttempts)
 
         val requestStartNs = System.nanoTime()
+        val translationService = translationServiceProvider.serviceFor(provider)
         val apiResult =
-          geminiApiClient.translateBatch(
+          translationService.translateBatch(
             apiKey = activeKey.key,
-            model = model,
-            temperature = temperature,
-            thinkingBudget = thinkingBudget,
-            systemPrompt = systemPrompt,
-            fewShotExamples = fewShotExamples,
-            inputMode = inputMode,
-            title = title,
-            secondaryMeta = secondaryMeta,
-            batchSrtPayload = batchSrtPayload,
-            batchIndex = batchIndex,
-            totalBatches = totalBatches,
-            fileName = fileName,
-            surroundingContext = surroundingContext,
-            provider = provider,
+            request =
+              TranslationRequest(
+                model = model,
+                temperature = temperature,
+                thinkingBudget = thinkingBudget,
+                systemPrompt = systemPrompt,
+                fewShotExamples = fewShotExamples,
+                inputMode = inputMode,
+                title = title,
+                secondaryMeta = secondaryMeta,
+                batchSrtPayload = batchSrtPayload,
+                batchIndex = batchIndex,
+                totalBatches = totalBatches,
+                fileName = fileName,
+                surroundingContext = surroundingContext,
+              ),
           )
         val callLatencyMs = ((System.nanoTime() - requestStartNs) / 1_000_000L).coerceAtLeast(1L)
 

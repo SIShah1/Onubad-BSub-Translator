@@ -10,6 +10,7 @@ import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.example.domain.model.ApiProvider
 import com.example.domain.model.InputMode
 import com.example.domain.model.TranslationJobRequest
 import com.example.srt.SrtEngine
@@ -30,6 +31,7 @@ data class WorkTranslationManifest(
   @Json(name = "title") val title: String,
   @Json(name = "secondaryMeta") val secondaryMeta: String,
   @Json(name = "files") val files: List<WorkSubtitleEntry>,
+  @Json(name = "apiProvider") val apiProvider: String? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -92,6 +94,7 @@ object TranslationWorkScheduler {
           title = request.title,
           secondaryMeta = request.secondaryMeta,
           files = entries,
+          apiProvider = request.apiProvider?.name,
         )
 
       val manifestFile = File(jobsDir, "$jobUuid.json")
@@ -113,6 +116,7 @@ object TranslationWorkScheduler {
               SubtitleTranslationWorker.KEY_JOB_CONFIG_PATH to manifestFile.absolutePath,
               SubtitleTranslationWorker.KEY_INPUT_MODE to
                 (if (request.inputMode == InputMode.MOVIE) InputMode.MOVIE.name else InputMode.SERIES.name),
+              SubtitleTranslationWorker.KEY_API_PROVIDER to request.apiProvider?.name,
             )
           )
           .build()
@@ -131,6 +135,7 @@ object TranslationWorkScheduler {
     title: String = "",
     secondaryMeta: String = "",
     roomJobId: String = UUID.randomUUID().toString(),
+    apiProvider: ApiProvider? = null,
   ): UUID =
     withContext(Dispatchers.IO) {
       val appContext = context.applicationContext
@@ -157,6 +162,7 @@ object TranslationWorkScheduler {
               SubtitleTranslationWorker.KEY_TITLE to title,
               SubtitleTranslationWorker.KEY_SECONDARY_META to secondaryMeta,
               SubtitleTranslationWorker.KEY_ROOM_JOB_ID to roomJobId,
+              SubtitleTranslationWorker.KEY_API_PROVIDER to apiProvider?.name,
             )
           )
           .build()

@@ -57,6 +57,7 @@ import com.example.data.network.ChatChoiceDto
 import com.example.data.network.ChatCompletionRequest
 import com.example.data.network.ChatCompletionResponse
 import com.example.data.network.ChatMessageDto
+import com.example.data.network.DeepSeekApiService
 import com.example.data.network.GeminiApiClient
 import com.example.data.network.GeminiApiService
 import com.example.data.network.GeminiCallResult
@@ -66,6 +67,7 @@ import com.example.data.network.GeminiGenerateContentRequest
 import com.example.data.network.GeminiGenerateContentResponse
 import com.example.data.network.GeminiKeyRotationInterceptor
 import com.example.data.network.GeminiPart
+import com.example.data.network.GrokApiService
 import com.example.data.network.OpenAiCompatibleApiService
 import com.example.data.network.RotationExecutionResult
 import com.example.domain.model.ApiKeyStatus
@@ -87,6 +89,7 @@ import com.example.service.SubtitleTranslationService
 import com.example.service.SubtitleTranslationServiceResult
 import com.example.ui.components.ContextAwareTranslationCard
 import com.example.ui.screens.ApiKeysScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.screens.StudioScreen
 import com.example.ui.screens.SubtitlePreviewScreen
 import com.example.ui.screens.fitHeroTitleFontSizeSp
@@ -491,13 +494,13 @@ class ExampleRobolectricTest {
   }
 
   @Test
-  fun `studio hero banner displays redesigned branding without theme toggle and stacks equal sized status containers`() {
-    var keysClicked = false
+  fun `studio hero banner displays redesigned branding with active engine badge instead of key pool`() {
+    var engineSettingsClicked = false
     composeTestRule.setContent {
       BSubTranslatorTheme(themeMode = ThemeMode.LIGHT) {
         StudioScreen(
           formState = StudioFormState(),
-          settings = AppSettings(themeMode = ThemeMode.LIGHT),
+          settings = AppSettings(themeMode = ThemeMode.LIGHT, apiProvider = ApiProvider.GROK),
           apiKeys = emptyList(),
           sessionState = TranslationSessionState(),
           onInputModeChange = {},
@@ -513,39 +516,41 @@ class ExampleRobolectricTest {
           onStartTranslation = {},
           onAbortTranslation = {},
           onClearLogs = {},
-          onNavigateToKeys = { keysClicked = true },
+          onNavigateToEngineSettings = { engineSettingsClicked = true },
         )
       }
     }
 
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("hero_theme_toggle_chip").assertDoesNotExist()
+    composeTestRule.onNodeWithTag("hero_keys_chip").assertDoesNotExist()
     composeTestRule.onNodeWithText("BSub Translator").assertIsDisplayed()
     composeTestRule.onNodeWithText("English to Bengali Subtitle Studio").assertIsDisplayed()
 
     val bannerBounds = composeTestRule.onNodeWithTag("hero_banner").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-    val keysNode = composeTestRule.onNodeWithTag("hero_keys_chip").assertIsDisplayed()
+    val engineNode = composeTestRule.onNodeWithTag("hero_engine_chip").assertIsDisplayed()
+    engineNode.assertTextContains("Engine: Grok", substring = true)
     val modelNode = composeTestRule.onNodeWithTag("hero_model_chip").assertIsDisplayed()
     val chunkNode = composeTestRule.onNodeWithTag("hero_chunk_chip").assertIsDisplayed()
 
-    val keysBounds = keysNode.fetchSemanticsNode().boundsInRoot
+    val engineBounds = engineNode.fetchSemanticsNode().boundsInRoot
     val modelBounds = modelNode.fetchSemanticsNode().boundsInRoot
     val chunkBounds = chunkNode.fetchSemanticsNode().boundsInRoot
     val density = composeTestRule.density.density
 
     assertTrue("Expected compact hero banner <= 112dp", bannerBounds.height <= 112f * density)
-    assertTrue("Expected short status pills <= 26dp, was ${keysBounds.height / density}dp", keysBounds.height <= 26f * density)
-    assertTrue("Expected top pill inside banner", keysBounds.top >= bannerBounds.top)
+    assertTrue("Expected short status pills <= 26dp, was ${engineBounds.height / density}dp", engineBounds.height <= 26f * density)
+    assertTrue("Expected top pill inside banner", engineBounds.top >= bannerBounds.top)
     assertTrue("Expected bottom pill inside banner", chunkBounds.bottom <= bannerBounds.bottom)
-    assertEquals(keysBounds.width, modelBounds.width, 1f)
+    assertEquals(engineBounds.width, modelBounds.width, 1f)
     assertEquals(modelBounds.width, chunkBounds.width, 1f)
-    assertEquals(keysBounds.height, modelBounds.height, 1f)
+    assertEquals(engineBounds.height, modelBounds.height, 1f)
     assertEquals(modelBounds.height, chunkBounds.height, 1f)
-    assertTrue("Expected right-side pills stacked vertically", keysBounds.top < modelBounds.top)
+    assertTrue("Expected right-side pills stacked vertically", engineBounds.top < modelBounds.top)
     assertTrue("Expected model pill above chunk pill", modelBounds.top < chunkBounds.top)
 
-    keysNode.performClick()
-    assertTrue(keysClicked)
+    engineNode.performClick()
+    assertTrue(engineSettingsClicked)
   }
 
   @Test
@@ -582,13 +587,13 @@ class ExampleRobolectricTest {
     val titleBounds = composeTestRule.onNodeWithText("BSub Translator").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
     val subtitleBounds =
       composeTestRule.onNodeWithText("English to Bengali Subtitle Studio").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-    val keysBounds = composeTestRule.onNodeWithTag("hero_keys_chip").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
+    val engineBounds = composeTestRule.onNodeWithTag("hero_engine_chip").assertIsDisplayed().fetchSemanticsNode().boundsInRoot
 
     assertTrue("Expected BSub Translator to sit cleanly inside banner", titleBounds.top >= bannerBounds.top)
     assertTrue("Expected subtitle to sit cleanly inside banner", subtitleBounds.bottom <= bannerBounds.bottom)
     assertTrue("Expected title stacked above subtitle", titleBounds.top < subtitleBounds.top)
-    assertTrue("Expected title to stay left of right pill stack", titleBounds.right <= keysBounds.left)
-    assertTrue("Expected subtitle to stay left of right pill stack", subtitleBounds.right <= keysBounds.left)
+    assertTrue("Expected title to stay left of right pill stack", titleBounds.right <= engineBounds.left)
+    assertTrue("Expected subtitle to stay left of right pill stack", subtitleBounds.right <= engineBounds.left)
     assertTrue("Expected compact hero banner <= 112dp", bannerBounds.height <= 112f * density)
 
     // Verify proportional width-matching solver matches subtitle width within 1px
@@ -2951,4 +2956,195 @@ class ExampleRobolectricTest {
         keyStats.sumOf { it.successfulRequests } >= 3,
       )
     }
+
+  @Test
+  fun `workmanager dynamically swaps gemini grok and deepseek services via provider input data`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 5)
+      app.settingsRepository.setModel(ParamMode.DEFAULT, "")
+      app.settingsRepository.setContextLines(ParamMode.MANUAL, 0)
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+
+      app.secureKeyStorage.addSingleKey("AIzaSyWorkerGemKey1234567890", "Gem", ApiProvider.GEMINI)
+      app.secureKeyStorage.addSingleKey("xai-worker-grok-key-1234567", "Grok", ApiProvider.GROK)
+      app.secureKeyStorage.addSingleKey("sk-worker-ds-key-1234567890", "DeepSeek", ApiProvider.DEEPSEEK)
+
+      val calledServices = mutableListOf<String>()
+      fun replyForChat(request: ChatCompletionRequest): Response<ChatCompletionResponse> {
+        val blocks = com.example.srt.SrtParser.parseBlocks(request.messages.last().content)
+        val reply = blocks.joinToString("\n\n") { b -> "${b.index}\n${b.timestamp}\nবাংলা ${b.index}" }
+        return Response.success(
+          ChatCompletionResponse(
+            choices =
+              listOf(
+                ChatChoiceDto(
+                  message = ChatMessageDto(role = "assistant", content = reply),
+                  finishReason = "stop",
+                )
+              )
+          )
+        )
+      }
+
+      val fakeGemini =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ) = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            calledServices.add("GEMINI:$apiKey:$model")
+            val blocks =
+              com.example.srt.SrtParser.parseBlocks(request.contents.last().parts.first().text.orEmpty())
+            val reply = blocks.joinToString("\n\n") { b -> "${b.index}\n${b.timestamp}\nবাংলা ${b.index}" }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = reply))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val fakeGrok =
+        object : GrokApiService {
+          override suspend fun createChatCompletion(
+            authorization: String,
+            request: ChatCompletionRequest,
+          ): Response<ChatCompletionResponse> {
+            calledServices.add("GROK:$authorization:${request.model}")
+            return replyForChat(request)
+          }
+        }
+
+      val fakeDeepSeek =
+        object : DeepSeekApiService {
+          override suspend fun createChatCompletion(
+            authorization: String,
+            request: ChatCompletionRequest,
+          ): Response<ChatCompletionResponse> {
+            calledServices.add("DEEPSEEK:$authorization:${request.model}")
+            return replyForChat(request)
+          }
+        }
+
+      app.overrideServicesForTesting(
+        customService = fakeGemini,
+        customGrokService = fakeGrok,
+        customDeepSeekService = fakeDeepSeek,
+      )
+
+      val sampleSrt = "1\n00:00:01,000 --> 00:00:02,000\nHello world."
+
+      for (provider in listOf(ApiProvider.GROK, ApiProvider.DEEPSEEK, ApiProvider.GEMINI)) {
+        val worker =
+          TestListenableWorkerBuilder<SubtitleTranslationWorker>(app)
+            .setInputData(
+              workDataOf(
+                SubtitleTranslationWorker.KEY_SRT_CONTENT to sampleSrt,
+                SubtitleTranslationWorker.KEY_FILE_NAME to "${provider.name.lowercase()}.srt",
+                SubtitleTranslationWorker.KEY_API_PROVIDER to provider.name,
+              )
+            )
+            .build()
+        val result = worker.doWork()
+        assertTrue("Expected success for $provider, got $result", result is ListenableWorker.Result.Success)
+      }
+
+      assertEquals(
+        listOf(
+          "GROK:Bearer xai-worker-grok-key-1234567:${DefaultConfig.GROK_MODEL}",
+          "DEEPSEEK:Bearer sk-worker-ds-key-1234567890:${DefaultConfig.DEEPSEEK_MODEL}",
+          "GEMINI:AIzaSyWorkerGemKey1234567890:${DefaultConfig.GEMINI_MODEL}",
+        ),
+        calledServices,
+      )
+      app.overrideServicesForTesting()
+    }
+
+  @Test
+  fun `settings screen unified api configuration manages independent provider keys and primary engine`() {
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+    }
+
+    val viewModel = MainViewModel(app)
+    composeTestRule.setContent {
+      val settings by viewModel.settings.collectAsState()
+      BSubTranslatorTheme {
+        SettingsScreen(
+          settings = settings,
+          viewModel = viewModel,
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("unified_api_config_card").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: Gemini", substring = true)
+
+    // Toggle primary engine to Grok
+    composeTestRule.onNodeWithTag("settings_provider_grok").performScrollTo().performClick()
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: Grok", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    // Add a Grok key while primary is Grok
+    composeTestRule.onNodeWithTag("settings_bulk_keys_input").performScrollTo().performTextInput("xai-settings-grok-key-123456")
+    composeTestRule.onNodeWithTag("settings_save_bulk_keys_button").performScrollTo().performClick()
+
+    // Switch independently to DeepSeek key tab and save a DeepSeek key (primary remains Grok)
+    composeTestRule.onNodeWithTag("settings_key_tab_deepseek").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("settings_bulk_keys_input").performScrollTo().performTextReplacement("sk-settings-ds-key-123456789")
+    composeTestRule.onNodeWithTag("settings_save_bulk_keys_button").performScrollTo().performClick()
+
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("settings_key_tab_grok").assertTextContains("Grok (1)", substring = true)
+        composeTestRule.onNodeWithTag("settings_key_tab_deepseek").assertTextContains("DeepSeek (1)", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    // Promote DeepSeek to primary engine using tab CTA
+    composeTestRule.onNodeWithTag("settings_set_primary_from_tab_button").performScrollTo().performClick()
+    composeTestRule.waitUntil(timeoutMillis = 5000L) {
+      org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+      try {
+        composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: DeepSeek", substring = true)
+        true
+      } catch (_: AssertionError) {
+        false
+      }
+    }
+
+    runBlocking {
+      assertEquals(ApiProvider.DEEPSEEK, app.settingsRepository.getSettingsSnapshot().apiProvider)
+      assertEquals(1, app.secureKeyStorage.getKeysSnapshot(ApiProvider.GROK).size)
+      assertEquals(1, app.secureKeyStorage.getKeysSnapshot(ApiProvider.DEEPSEEK).size)
+      assertEquals(0, app.secureKeyStorage.getKeysSnapshot(ApiProvider.GEMINI).size)
+    }
+  }
 }
