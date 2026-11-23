@@ -62,7 +62,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.domain.model.AppSettings
 import com.example.domain.model.DefaultConfig
 import com.example.domain.model.FewShotExample
@@ -75,7 +74,6 @@ import com.example.ui.components.ContextAwareTranslationCard
 import com.example.ui.components.ParamModeHeader
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StudioSectionCard
-import com.example.ui.components.UnifiedApiConfigCard
 import com.example.ui.theme.BSubShape
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalThemeController
@@ -90,8 +88,6 @@ fun SettingsScreen(
 ) {
   var editingExample by remember { mutableStateOf<FewShotExample?>(null) }
   var showAddExampleDialog by remember { mutableStateOf(false) }
-  val apiKeys by viewModel.apiKeys.collectAsStateWithLifecycle()
-  val sessionState by viewModel.sessionState.collectAsStateWithLifecycle()
   val themeController = LocalThemeController.current
   val activeModeLabel =
     when (themeController.themeMode) {
@@ -178,22 +174,7 @@ fun SettingsScreen(
       }
     }
 
-    // 2. Unified API Configuration & Primary Engine
-    UnifiedApiConfigCard(
-      settings = settings,
-      apiKeys = apiKeys,
-      isTranslationRunning = sessionState.isRunningOrCooldown,
-      onSetActiveProvider = viewModel::setApiProvider,
-      onSaveBulkKeys = viewModel::saveBulkApiKeys,
-      onImportKeysFile = viewModel::importApiKeysFromUri,
-      onAddSingleKey = viewModel::addSingleApiKey,
-      onEditKey = viewModel::editApiKey,
-      onRemoveKey = viewModel::removeApiKey,
-      onClearAllKeys = viewModel::clearAllApiKeys,
-      onResetAllStatuses = viewModel::resetAllKeyStatuses,
-    )
-
-    // 3. Prompt Settings
+    // 2. Prompt Settings
     PromptSettingsCard(
       settings = settings,
       onPromptModeChange = viewModel::setPromptMode,

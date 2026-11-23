@@ -280,7 +280,7 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 onClearLogs = viewModel::clearProcessingLogs,
                 onPreviewFile = viewModel::openStudioFilePreview,
                 onNavigateToKeys = { navigateToTab(AppDestination.KEYS.route) },
-                onNavigateToEngineSettings = { navigateToTab(AppDestination.SETTINGS.route) },
+                onNavigateToEngineSettings = { navigateToTab(AppDestination.KEYS.route) },
               )
             }
 
@@ -289,6 +289,7 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 apiKeys = apiKeys,
                 isTranslationRunning = sessionState.isRunningOrCooldown,
                 activeProvider = settings.apiProvider,
+                effectiveModel = settings.effectiveModel,
                 onSetActiveProvider = viewModel::setApiProvider,
                 onSaveBulkKeys = viewModel::saveBulkApiKeys,
                 onImportKeysFile = viewModel::importApiKeysFromUri,

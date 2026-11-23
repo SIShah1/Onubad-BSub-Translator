@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteForever
@@ -36,6 +37,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +61,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.preferences.SecureKeyStorage
@@ -65,6 +70,7 @@ import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.ApiKeyEntry
 import com.example.domain.model.ApiKeyStatus
 import com.example.domain.model.ApiProvider
+import com.example.domain.model.DefaultConfig
 import com.example.ui.components.SectionTitleRow
 import com.example.ui.components.StatusPill
 import com.example.ui.components.StudioSectionCard
@@ -77,6 +83,7 @@ fun ApiKeysScreen(
   apiKeys: List<ApiKeyEntry>,
   isTranslationRunning: Boolean,
   activeProvider: ApiProvider = ApiProvider.GEMINI,
+  effectiveModel: String = DefaultConfig.defaultModelFor(activeProvider),
   onSetActiveProvider: (ApiProvider) -> Unit = {},
   onSaveBulkKeys: (String, ApiProvider) -> Unit,
   onImportKeysFile: (Uri?, ApiProvider) -> Unit = { _, _ -> },
@@ -102,6 +109,10 @@ fun ApiKeysScreen(
       onImportKeysFile(uri, selectedProvider)
     }
 
+  val activeProviderKeysCount =
+    remember(apiKeys, activeProvider) {
+      apiKeys.count { it.provider == activeProvider && it.status == ApiKeyStatus.ACTIVE }
+    }
   val providerKeys =
     remember(apiKeys, selectedProvider) {
       apiKeys.filter { it.provider == selectedProvider }
@@ -115,35 +126,63 @@ fun ApiKeysScreen(
     modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(14.dp),
   ) {
-    // 1. Provider Segments & Key Pool Overview
-    StudioSectionCard {
+    // 1. Unified API Engine & Keys Card
+    StudioSectionCard(modifier = Modifier.testTag("unified_api_config_card")) {
       SectionTitleRow(
-        title = "API Key Manager",
+        title = "API Engine & Keys",
         subtitle = "Encrypted with Android Keystore AES-256",
         icon = Icons.Rounded.Lock,
-        trailing = {
-          FilledTonalButton(
-            onClick = { showAddSingleDialog = true },
-            enabled = !isTranslationRunning,
-            colors =
-              ButtonDefaults.filledTonalButtonColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-              ),
-            modifier = Modifier.minimumInteractiveComponentSize().testTag("add_single_key_button"),
-          ) {
-            Icon(
-              imageVector = Icons.Rounded.Add,
-              contentDescription = null,
-              modifier = Modifier.size(18.dp),
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text("Add One")
-          }
-        },
       )
 
       Spacer(modifier = Modifier.height(12.dp))
+
+      // Active Engine Status Summary
+      Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        modifier =
+          Modifier.fillMaxWidth()
+            .semantics(mergeDescendants = true) {}
+            .testTag("keys_active_engine_badge"),
+      ) {
+        Row(
+          modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+          verticalAlignment = Alignment.CenterVertically,
+          horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Bolt,
+            contentDescription = "Active Engine",
+            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+            modifier = Modifier.size(18.dp),
+          )
+          Column(modifier = Modifier.weight(1f)) {
+            Text(
+              text = "Active Engine: ${activeProvider.displayName}",
+              style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+              color = MaterialTheme.colorScheme.onTertiaryContainer,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+              text = "$effectiveModel • $activeProviderKeysCount active key(s)",
+              style = MaterialTheme.typography.bodySmall.copy(fontFamily = JetBrainsMonoFamily),
+              color = MaterialTheme.colorScheme.onTertiaryContainer,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
+          }
+        }
+      }
+
+      Spacer(modifier = Modifier.height(12.dp))
+
+      Text(
+        text = "Primary Translation Engine",
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurface,
+      )
+      Spacer(modifier = Modifier.height(8.dp))
 
       val segmentedColors =
         SegmentedButtonDefaults.colors(
@@ -157,16 +196,16 @@ fun ApiKeysScreen(
 
       SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
         ApiProvider.entries.forEachIndexed { index, provider ->
-          val count = apiKeys.count { it.provider == provider }
           SegmentedButton(
-            selected = selectedProvider == provider,
-            onClick = { selectedProvider = provider },
+            selected = activeProvider == provider,
+            onClick = { onSetActiveProvider(provider) },
+            enabled = !isTranslationRunning,
             shape = SegmentedButtonDefaults.itemShape(index = index, count = ApiProvider.entries.size),
             colors = segmentedColors,
-            modifier = Modifier.testTag("provider_segment_${provider.name.lowercase()}"),
+            modifier = Modifier.testTag("keys_primary_provider_${provider.name.lowercase()}"),
           ) {
             Text(
-              text = "${provider.displayName} ($count)",
+              text = provider.displayName,
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
             )
@@ -174,54 +213,65 @@ fun ApiKeysScreen(
         }
       }
 
-      Spacer(modifier = Modifier.height(10.dp))
+      Spacer(modifier = Modifier.height(14.dp))
+      HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+      Spacer(modifier = Modifier.height(14.dp))
 
       Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        if (selectedProvider == activeProvider) {
-          Surface(
-            shape = RoundedCornerShape(50),
-            color = MaterialTheme.colorScheme.tertiaryContainer,
-            modifier = Modifier.testTag("active_provider_badge"),
-          ) {
-            Row(
-              modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-              verticalAlignment = Alignment.CenterVertically,
-              horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-              Icon(
-                imageVector = Icons.Rounded.CheckCircle,
-                contentDescription = "Active provider",
-                tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                modifier = Modifier.size(16.dp),
-              )
-              Text(
-                text = "${selectedProvider.displayName} Active for Translation",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onTertiaryContainer,
-              )
-            }
-          }
-        } else {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
           Text(
-            text = "Active provider: ${activeProvider.displayName}",
+            text = "Provider Key Pools",
+            style = MaterialTheme.typography.titleSmall,
+            color = MaterialTheme.colorScheme.onSurface,
+          )
+          Text(
+            text = "Manage Gemini, Grok, and DeepSeek keys independently",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )
-          FilledTonalButton(
-            onClick = { onSetActiveProvider(selectedProvider) },
-            enabled = !isTranslationRunning,
-            modifier = Modifier.minimumInteractiveComponentSize().testTag("activate_provider_button"),
-          ) {
-            Text("Use ${selectedProvider.displayName}")
-          }
+        }
+        FilledTonalButton(
+          onClick = { showAddSingleDialog = true },
+          enabled = !isTranslationRunning,
+          colors =
+            ButtonDefaults.filledTonalButtonColors(
+              containerColor = MaterialTheme.colorScheme.primaryContainer,
+              contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            ),
+          modifier = Modifier.minimumInteractiveComponentSize().testTag("add_single_key_button"),
+        ) {
+          Icon(
+            imageVector = Icons.Rounded.Add,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+          )
+          Spacer(modifier = Modifier.width(4.dp))
+          Text("Add Key")
         }
       }
 
-      Spacer(modifier = Modifier.height(12.dp))
+      Spacer(modifier = Modifier.height(10.dp))
+
+      FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
+        ApiProvider.entries.forEach { provider ->
+          val count = apiKeys.count { it.provider == provider }
+          FilterChip(
+            selected = selectedProvider == provider,
+            onClick = { selectedProvider = provider },
+            label = { Text("${provider.displayName} ($count)") },
+            modifier = Modifier.testTag("provider_segment_${provider.name.lowercase()}"),
+          )
+        }
+      }
+
+      Spacer(modifier = Modifier.height(10.dp))
 
       FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -253,6 +303,45 @@ fun ApiKeysScreen(
         }
       }
 
+      Spacer(modifier = Modifier.height(10.dp))
+
+      if (selectedProvider == activeProvider) {
+        Surface(
+          shape = RoundedCornerShape(50),
+          color = MaterialTheme.colorScheme.tertiaryContainer,
+          modifier = Modifier.testTag("active_provider_badge"),
+        ) {
+          Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            Icon(
+              imageVector = Icons.Rounded.CheckCircle,
+              contentDescription = "Active provider",
+              tint = MaterialTheme.colorScheme.onTertiaryContainer,
+              modifier = Modifier.size(16.dp),
+            )
+            Text(
+              text = "${selectedProvider.displayName} Active for Translation",
+              style = MaterialTheme.typography.labelMedium,
+              color = MaterialTheme.colorScheme.onTertiaryContainer,
+            )
+          }
+        }
+      } else {
+        FilledTonalButton(
+          onClick = { onSetActiveProvider(selectedProvider) },
+          enabled = !isTranslationRunning,
+          modifier =
+            Modifier.fillMaxWidth()
+              .minimumInteractiveComponentSize()
+              .testTag("activate_provider_button"),
+        ) {
+          Text("Set ${selectedProvider.displayName} as Primary Engine")
+        }
+      }
+
       if (providerKeys.isNotEmpty() && !isTranslationRunning) {
         Spacer(modifier = Modifier.height(12.dp))
         Row(
@@ -261,7 +350,10 @@ fun ApiKeysScreen(
         ) {
           OutlinedButton(
             onClick = { onResetAllStatuses(selectedProvider) },
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("reset_key_statuses_button"),
+            modifier =
+              Modifier.weight(1f)
+                .minimumInteractiveComponentSize()
+                .testTag("reset_key_statuses_button"),
           ) {
             Icon(
               imageVector = Icons.Rounded.Refresh,
@@ -269,13 +361,16 @@ fun ApiKeysScreen(
               modifier = Modifier.size(18.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Reset Statuses")
+            Text("Reset Statuses", maxLines = 1, overflow = TextOverflow.Ellipsis)
           }
 
           OutlinedButton(
             onClick = { showClearAllConfirm = true },
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
-            modifier = Modifier.weight(1f).minimumInteractiveComponentSize().testTag("clear_all_keys_button"),
+            modifier =
+              Modifier.weight(1f)
+                .minimumInteractiveComponentSize()
+                .testTag("clear_all_keys_button"),
           ) {
             Icon(
               imageVector = Icons.Rounded.DeleteForever,
@@ -284,7 +379,12 @@ fun ApiKeysScreen(
               modifier = Modifier.size(18.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Clear All", color = MaterialTheme.colorScheme.error)
+            Text(
+              text = "Clear All",
+              color = MaterialTheme.colorScheme.error,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+            )
           }
         }
       }

@@ -2616,10 +2616,10 @@ class ExampleRobolectricTest {
     }
 
     composeTestRule.waitForIdle()
-    composeTestRule.onNodeWithTag("provider_segment_gemini").assertIsDisplayed()
-    composeTestRule.onNodeWithTag("provider_segment_grok").assertIsDisplayed()
-    composeTestRule.onNodeWithTag("provider_segment_deepseek").assertIsDisplayed()
-    composeTestRule.onNodeWithTag("active_provider_badge").assertIsDisplayed()
+    composeTestRule.onNodeWithTag("provider_segment_gemini").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("provider_segment_grok").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("provider_segment_deepseek").performScrollTo().assertIsDisplayed()
+    composeTestRule.onNodeWithTag("active_provider_badge").performScrollTo().assertIsDisplayed()
 
     // Switch to Grok segment, save a Grok key, and activate Grok
     composeTestRule.onNodeWithTag("provider_segment_grok").performScrollTo().performClick()
@@ -2630,8 +2630,8 @@ class ExampleRobolectricTest {
     composeTestRule.waitUntil(timeoutMillis = 5000L) {
       org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
       try {
-        composeTestRule.onNodeWithTag("active_provider_badge").assertIsDisplayed()
-        composeTestRule.onNodeWithTag("provider_segment_grok").assertTextContains("Grok (1)", substring = true)
+        composeTestRule.onNodeWithTag("active_provider_badge").performScrollTo().assertIsDisplayed()
+        composeTestRule.onNodeWithTag("provider_segment_grok").performScrollTo().assertTextContains("Grok (1)", substring = true)
         true
       } catch (_: AssertionError) {
         false
@@ -3075,33 +3075,53 @@ class ExampleRobolectricTest {
     }
 
   @Test
-  fun `settings screen unified api configuration manages independent provider keys and primary engine`() {
+  fun `keys screen unified api configuration manages independent provider keys and primary engine`() {
     runBlocking {
       app.secureKeyStorage.clearAllKeys()
       app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
     }
 
     val viewModel = MainViewModel(app)
+    var showSettingsOnly by mutableStateOf(false)
     composeTestRule.setContent {
       val settings by viewModel.settings.collectAsState()
+      val apiKeys by viewModel.apiKeys.collectAsState()
+      val sessionState by viewModel.sessionState.collectAsState()
       BSubTranslatorTheme {
-        SettingsScreen(
-          settings = settings,
-          viewModel = viewModel,
-        )
+        if (!showSettingsOnly) {
+          ApiKeysScreen(
+            apiKeys = apiKeys,
+            isTranslationRunning = sessionState.isRunningOrCooldown,
+            activeProvider = settings.apiProvider,
+            effectiveModel = settings.effectiveModel,
+            onSetActiveProvider = viewModel::setApiProvider,
+            onSaveBulkKeys = viewModel::saveBulkApiKeys,
+            onImportKeysFile = viewModel::importApiKeysFromUri,
+            onAddSingleKey = viewModel::addSingleApiKey,
+            onEditKey = viewModel::editApiKey,
+            onRemoveKey = viewModel::removeApiKey,
+            onClearAllKeys = viewModel::clearAllApiKeys,
+            onResetAllStatuses = viewModel::resetAllKeyStatuses,
+          )
+        } else {
+          SettingsScreen(
+            settings = settings,
+            viewModel = viewModel,
+          )
+        }
       }
     }
 
     composeTestRule.waitForIdle()
     composeTestRule.onNodeWithTag("unified_api_config_card").performScrollTo().assertIsDisplayed()
-    composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: Gemini", substring = true)
+    composeTestRule.onNodeWithTag("keys_active_engine_badge").assertTextContains("Active Engine: Gemini", substring = true)
 
     // Toggle primary engine to Grok
-    composeTestRule.onNodeWithTag("settings_provider_grok").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("keys_primary_provider_grok").performScrollTo().performClick()
     composeTestRule.waitUntil(timeoutMillis = 5000L) {
       org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
       try {
-        composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: Grok", substring = true)
+        composeTestRule.onNodeWithTag("keys_active_engine_badge").assertTextContains("Active Engine: Grok", substring = true)
         true
       } catch (_: AssertionError) {
         false
@@ -3109,19 +3129,19 @@ class ExampleRobolectricTest {
     }
 
     // Add a Grok key while primary is Grok
-    composeTestRule.onNodeWithTag("settings_bulk_keys_input").performScrollTo().performTextInput("xai-settings-grok-key-123456")
-    composeTestRule.onNodeWithTag("settings_save_bulk_keys_button").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("bulk_keys_input").performScrollTo().performTextInput("xai-settings-grok-key-123456")
+    composeTestRule.onNodeWithTag("save_bulk_keys_button").performScrollTo().performClick()
 
     // Switch independently to DeepSeek key tab and save a DeepSeek key (primary remains Grok)
-    composeTestRule.onNodeWithTag("settings_key_tab_deepseek").performScrollTo().performClick()
-    composeTestRule.onNodeWithTag("settings_bulk_keys_input").performScrollTo().performTextReplacement("sk-settings-ds-key-123456789")
-    composeTestRule.onNodeWithTag("settings_save_bulk_keys_button").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("provider_segment_deepseek").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("bulk_keys_input").performScrollTo().performTextReplacement("sk-settings-ds-key-123456789")
+    composeTestRule.onNodeWithTag("save_bulk_keys_button").performScrollTo().performClick()
 
     composeTestRule.waitUntil(timeoutMillis = 5000L) {
       org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
       try {
-        composeTestRule.onNodeWithTag("settings_key_tab_grok").assertTextContains("Grok (1)", substring = true)
-        composeTestRule.onNodeWithTag("settings_key_tab_deepseek").assertTextContains("DeepSeek (1)", substring = true)
+        composeTestRule.onNodeWithTag("provider_segment_grok").assertTextContains("Grok (1)", substring = true)
+        composeTestRule.onNodeWithTag("provider_segment_deepseek").assertTextContains("DeepSeek (1)", substring = true)
         true
       } catch (_: AssertionError) {
         false
@@ -3129,16 +3149,22 @@ class ExampleRobolectricTest {
     }
 
     // Promote DeepSeek to primary engine using tab CTA
-    composeTestRule.onNodeWithTag("settings_set_primary_from_tab_button").performScrollTo().performClick()
+    composeTestRule.onNodeWithTag("activate_provider_button").performScrollTo().performClick()
     composeTestRule.waitUntil(timeoutMillis = 5000L) {
       org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
       try {
-        composeTestRule.onNodeWithTag("settings_active_engine_badge").assertTextContains("Active Engine: DeepSeek", substring = true)
+        composeTestRule.onNodeWithTag("keys_active_engine_badge").assertTextContains("Active Engine: DeepSeek", substring = true)
         true
       } catch (_: AssertionError) {
         false
       }
     }
+
+    // Verify Settings screen no longer hosts API Engine & Keys card
+    showSettingsOnly = true
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("unified_api_config_card").assertDoesNotExist()
+    composeTestRule.onNodeWithText("API Engine & Keys").assertDoesNotExist()
 
     runBlocking {
       assertEquals(ApiProvider.DEEPSEEK, app.settingsRepository.getSettingsSnapshot().apiProvider)
@@ -3240,7 +3266,7 @@ class ExampleRobolectricTest {
     }
 
   @Test
-  fun `persisted false gemini error on grok key auto-heals immediately in settings ui and storage`() {
+  fun `persisted false gemini error on grok key auto-heals immediately in keys ui and storage`() {
     runBlocking {
       app.secureKeyStorage.clearAllKeys()
       app.settingsRepository.setApiProvider(ApiProvider.GROK)
@@ -3258,10 +3284,22 @@ class ExampleRobolectricTest {
     val viewModel = MainViewModel(app)
     composeTestRule.setContent {
       val settings by viewModel.settings.collectAsState()
+      val apiKeys by viewModel.apiKeys.collectAsState()
+      val sessionState by viewModel.sessionState.collectAsState()
       BSubTranslatorTheme {
-        SettingsScreen(
-          settings = settings,
-          viewModel = viewModel,
+        ApiKeysScreen(
+          apiKeys = apiKeys,
+          isTranslationRunning = sessionState.isRunningOrCooldown,
+          activeProvider = settings.apiProvider,
+          effectiveModel = settings.effectiveModel,
+          onSetActiveProvider = viewModel::setApiProvider,
+          onSaveBulkKeys = viewModel::saveBulkApiKeys,
+          onImportKeysFile = viewModel::importApiKeysFromUri,
+          onAddSingleKey = viewModel::addSingleApiKey,
+          onEditKey = viewModel::editApiKey,
+          onRemoveKey = viewModel::removeApiKey,
+          onClearAllKeys = viewModel::clearAllApiKeys,
+          onResetAllStatuses = viewModel::resetAllKeyStatuses,
         )
       }
     }
@@ -3269,7 +3307,7 @@ class ExampleRobolectricTest {
     composeTestRule.waitUntil(timeoutMillis = 5000L) {
       org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
       try {
-        composeTestRule.onNodeWithTag("settings_active_engine_badge")
+        composeTestRule.onNodeWithTag("keys_active_engine_badge")
           .assertTextContains("1 active key(s)", substring = true)
         true
       } catch (_: AssertionError) {
@@ -3277,7 +3315,7 @@ class ExampleRobolectricTest {
       }
     }
 
-    composeTestRule.onNodeWithTag("settings_active_engine_badge")
+    composeTestRule.onNodeWithTag("keys_active_engine_badge")
       .assertTextContains("Active Engine: Grok", substring = true)
     composeTestRule.onNodeWithText("No Gemini API keys configured in DataStore").assertDoesNotExist()
     composeTestRule.onNodeWithText("Active: 1").performScrollTo().assertIsDisplayed()
