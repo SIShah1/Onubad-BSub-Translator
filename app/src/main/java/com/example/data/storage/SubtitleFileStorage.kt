@@ -13,6 +13,8 @@ import com.example.domain.model.SelectedSubtitleFile
 import com.example.domain.model.SrtBlock
 import com.example.srt.SrtEngine
 import com.example.srt.SrtParser
+import com.example.srt.SrtValidationReport
+import com.example.srt.SrtValidator
 import java.io.File
 import java.io.OutputStream
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +27,17 @@ data class SavedSubtitleOutput(
   val localBackupPath: String,
   val fileSizeBytes: Long,
 )
+
+sealed interface SaveValidatedSrtResult {
+  data class Saved(
+    val output: SavedSubtitleOutput,
+    val validationReport: SrtValidationReport,
+  ) : SaveValidatedSrtResult
+
+  data class ValidationFailed(
+    val validationReport: SrtValidationReport,
+  ) : SaveValidatedSrtResult
+}
 
 class SubtitleFileStorage(private val context: Context) {
 
@@ -97,6 +110,24 @@ class SubtitleFileStorage(private val context: Context) {
         rawContent = rawText,
       )
     }
+
+  suspend fun saveValidatedTranslatedSrt(
+    outputFileName: String,
+    srtContent: String,
+    originalBlocks: List<SrtBlock>? = null,
+  ): SaveValidatedSrtResult {
+    val report =
+      SrtValidator.validateAndRepairBeforeSave(
+        rawSrtContent = srtContent,
+        originalBlocks = originalBlocks,
+      )
+    if (!report.isValid) {
+      return SaveValidatedSrtResult.ValidationFailed(report)
+    }
+    val verifiedSrt = report.normalizedSrt ?: srtContent
+    val saved = saveTranslatedSrt(outputFileName, verifiedSrt)
+    return SaveValidatedSrtResult.Saved(output = saved, validationReport = report)
+  }
 
   suspend fun saveTranslatedSrt(
     outputFileName: String,

@@ -3326,4 +3326,131 @@ class ExampleRobolectricTest {
       assertEquals(null, healed.lastError)
     }
   }
+
+  @Test
+  fun `srt validator verifies strict HH MM SS mmm timing syntax and format integrity`() {
+    val validSrt =
+      """
+      1
+      00:00:01,000 --> 00:00:03,500
+      হ্যালো, তুমি কেমন আছো?
+
+      2
+      00:01:12,250 --> 00:01:15,000
+      সবকিছু ঠিক আছে।
+      """.trimIndent()
+
+    val validReport = com.example.srt.SrtValidator.validateSrtContent(validSrt)
+    assertTrue("Expected valid SRT report, got ${validReport.issues}", validReport.isValid)
+    assertEquals(2, validReport.totalBlocks)
+    assertEquals(2, validReport.validTimingBlocks)
+    assertTrue(validReport.issues.isEmpty())
+
+    val invalidTimingSrt =
+      """
+      1
+      00:65:01,000 --> 00:00:03,500
+      ভুল মিনিট
+
+      2
+      00:00:10,000 --> 00:00:05,000
+      উল্টো সময়
+      """.trimIndent()
+
+    val invalidReport = com.example.srt.SrtValidator.validateSrtContent(invalidTimingSrt)
+    assertFalse(invalidReport.isValid)
+    assertTrue(
+      invalidReport.issues.any {
+        it.type == com.example.srt.SrtValidationIssueType.INVALID_TIMING_SYNTAX
+      }
+    )
+    assertTrue(
+      invalidReport.issues.any {
+        it.type == com.example.srt.SrtValidationIssueType.REVERSED_TIMING_RANGE
+      }
+    )
+
+    val duplicateAndEmptyTextSrt =
+      """
+      1
+      00:00:01,000 --> 00:00:02,000
+      প্রথম লাইন
+
+      1
+      00:00:03,000 --> 00:00:04,000
+
+      """.trimIndent()
+
+    val integrityReport = com.example.srt.SrtValidator.validateSrtContent(duplicateAndEmptyTextSrt)
+    assertFalse(integrityReport.isValid)
+    assertTrue(
+      integrityReport.issues.any {
+        it.type == com.example.srt.SrtValidationIssueType.DUPLICATE_SERIAL
+      }
+    )
+    assertTrue(
+      integrityReport.issues.any {
+        it.type == com.example.srt.SrtValidationIssueType.MISSING_TEXT
+      }
+    )
+  }
+
+  @Test
+  fun `file storage saveValidatedTranslatedSrt normalizes minor timing formats and rejects corrupted srt`() =
+    runBlocking {
+      val originalBlocks =
+        listOf(
+          SrtBlock(1, "00:00:01,000 --> 00:00:03,000", listOf("Hello world.")),
+          SrtBlock(2, "00:00:04,000 --> 00:00:06,500", listOf("See you soon.")),
+        )
+
+      // 1. Minor dot/single-digit timing formatting is repaired to strict HH:MM:SS,mmm before save
+      val repairableSrt =
+        """
+        1
+        0:00:01.000 --> 0:00:03.000
+        হ্যালো পৃথিবী।
+
+        2
+        00:00:04.000 --> 00:00:06.500
+        শীঘ্রই দেখা হবে।
+        """.trimIndent()
+
+      val savedOutcome =
+        app.subtitleFileStorage.saveValidatedTranslatedSrt(
+          outputFileName = "validated_repair_BSub.srt",
+          srtContent = repairableSrt,
+          originalBlocks = originalBlocks,
+        )
+      assertTrue(
+        "Expected Saved outcome, got $savedOutcome",
+        savedOutcome is com.example.data.storage.SaveValidatedSrtResult.Saved,
+      )
+      val saved = savedOutcome as com.example.data.storage.SaveValidatedSrtResult.Saved
+      val writtenText =
+        app.subtitleFileStorage.readPreviewText(
+          saved.output.localBackupPath,
+          saved.output.contentUri,
+        )
+      assertTrue(writtenText.contains("00:00:01,000 --> 00:00:03,000"))
+      assertTrue(writtenText.contains("00:00:04,000 --> 00:00:06,500"))
+
+      // 2. Unparseable / corrupted SRT is rejected before saving
+      val corruptedSrt =
+        """
+        1
+        invalid timestamp syntax
+        হ্যালো
+        """.trimIndent()
+      val failedOutcome =
+        app.subtitleFileStorage.saveValidatedTranslatedSrt(
+          outputFileName = "corrupted_should_not_save_BSub.srt",
+          srtContent = corruptedSrt,
+          originalBlocks = originalBlocks,
+        )
+      assertTrue(
+        "Expected ValidationFailed outcome, got $failedOutcome",
+        failedOutcome is com.example.data.storage.SaveValidatedSrtResult.ValidationFailed,
+      )
+    }
 }

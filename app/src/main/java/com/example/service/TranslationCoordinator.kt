@@ -9,6 +9,7 @@ import com.example.data.network.GeminiApiClient
 import com.example.data.network.RotationExecutionResult
 import com.example.data.preferences.SecureKeyStorage
 import com.example.data.preferences.SettingsRepository
+import com.example.data.storage.SaveValidatedSrtResult
 import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.AppSettings
 import com.example.domain.model.InputMode
@@ -587,14 +588,54 @@ class TranslationCoordinator(
         throw cancel
       }
 
-      // All segments for this file completed & validated -> Reconstruct output SRT preserving timecodes
+      // All segments for this file completed & validated -> Reconstruct & verify final SRT before saving
       val formattedSrt =
         SrtParser.reconstructFromBlocks(
           originalBlocks = parsedBlocks,
           translatedBlocks = translatedFileBlocks,
           strictTimecodeCheck = true,
         )
-      val savedOutput = fileStorage.saveTranslatedSrt(expectedOutputName, formattedSrt)
+      val saveOutcome =
+        fileStorage.saveValidatedTranslatedSrt(
+          outputFileName = expectedOutputName,
+          srtContent = formattedSrt,
+          originalBlocks = parsedBlocks,
+        )
+      val savedOutput =
+        when (saveOutcome) {
+          is SaveValidatedSrtResult.Saved -> {
+            appendLog(
+              "SRT validation passed (${saveOutcome.validationReport.validTimingBlocks}/${saveOutcome.validationReport.totalBlocks} cues verified)",
+              LogLevel.INFO,
+            )
+            saveOutcome.output
+          }
+          is SaveValidatedSrtResult.ValidationFailed -> {
+            val validationError =
+              "Final SRT validation failed for ${file.fileName}: ${saveOutcome.validationReport.summary}"
+            finalizeIncompleteHistory(
+              historyId = historyId,
+              file = file,
+              translatedBlocks = translatedFileBlocks,
+              request = request,
+              settings = settings,
+              failureStatus = HistoryTranslationStatus.FAILED,
+              reason = validationError,
+            )
+            appendLog(validationError, LogLevel.ERROR)
+            TranslationLogger.logWorkerError(
+              workId = workId,
+              message = validationError,
+            )
+            _sessionState.update {
+              it.copy(
+                status = TranslationStatus.FAILED,
+                activePhaseMessage = validationError,
+              )
+            }
+            return
+          }
+        }
       runCatching {
         fileStorage.saveOriginalSourceBackup(
           translatedLocalBackupPath = savedOutput.localBackupPath,

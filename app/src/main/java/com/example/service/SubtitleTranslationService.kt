@@ -18,6 +18,7 @@ import com.example.domain.model.SrtBlock
 import com.example.srt.BatchReconciliationResult
 import com.example.srt.SrtEngine
 import com.example.srt.SrtParser
+import com.example.srt.SrtValidator
 import java.io.File
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -567,12 +568,23 @@ class SubtitleTranslationService(
         translatedBlocks = accumulated,
         strictTimecodeCheck = true,
       )
+    val validationReport =
+      SrtValidator.validateAndRepairBeforeSave(
+        rawSrtContent = reconstructed,
+        originalBlocks = parsedBlocks,
+      )
+    if (!validationReport.isValid) {
+      return SubtitleTranslationServiceResult.Failure(
+        reason = "Final SRT validation failed: ${validationReport.summary}",
+        partialTranslatedBlocks = accumulated.toList(),
+      )
+    }
 
     return SubtitleTranslationServiceResult.Success(
       fileName = fileName,
       originalBlocks = parsedBlocks,
       translatedBlocks = accumulated,
-      reconstructedBengaliSrt = reconstructed,
+      reconstructedBengaliSrt = validationReport.normalizedSrt ?: reconstructed,
       segmentsProcessed = segmentsProcessed,
     )
   }
