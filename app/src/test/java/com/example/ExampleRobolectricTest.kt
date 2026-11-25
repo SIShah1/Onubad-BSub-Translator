@@ -3545,4 +3545,72 @@ class ExampleRobolectricTest {
       assertEquals("বাকি 20", success.translatedBlocks[19].lines.first())
       assertEquals(listOf(20, 6), requestedCounts)
     }
+
+  @Test
+  fun `studio console log segment copies formatted logs to clipboard when Copy is tapped`() {
+    val logs =
+      listOf(
+        com.example.domain.model.ProcessingLogEntry(
+          id = 1L,
+          timestampLabel = "10:10:10",
+          message = "Started movie job: 1 file(s), 1353 blocks",
+          level = com.example.domain.model.LogLevel.INFO,
+        ),
+        com.example.domain.model.ProcessingLogEntry(
+          id = 2L,
+          timestampLabel = "10:10:17",
+          message = "Key #1 - Server Busy",
+          level = com.example.domain.model.LogLevel.WARNING,
+        ),
+        com.example.domain.model.ProcessingLogEntry(
+          id = 3L,
+          timestampLabel = "10:10:19",
+          message = "Key #4 - Daily Quota Exceeded",
+          level = com.example.domain.model.LogLevel.ERROR,
+        ),
+      )
+
+    var copiedCountCallback = 0
+    composeTestRule.setContent {
+      BSubTranslatorTheme {
+        StudioScreen(
+          formState = StudioFormState(),
+          settings = AppSettings(),
+          apiKeys = emptyList(),
+          sessionState = TranslationSessionState(logs = logs),
+          onInputModeChange = {},
+          onMovieNameChange = {},
+          onReleaseYearChange = {},
+          onSeriesNameChange = {},
+          onSeasonChange = {},
+          onSingleSrtPicked = {},
+          onMultipleSrtPicked = {},
+          onRemoveFile = {},
+          onMoveSeriesFile = { _, _ -> },
+          onClearFiles = {},
+          onStartTranslation = {},
+          onAbortTranslation = {},
+          onClearLogs = {},
+          onLogsCopied = { count -> copiedCountCallback = count },
+          onNavigateToKeys = {},
+        )
+      }
+    }
+
+    composeTestRule.waitForIdle()
+    composeTestRule.onNodeWithTag("copy_logs_button").performScrollTo().assertIsDisplayed().performClick()
+    composeTestRule.waitForIdle()
+
+    assertEquals(3, copiedCountCallback)
+    val clipboard =
+      app.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+    val clipText = clipboard.primaryClip?.getItemAt(0)?.text?.toString()
+    assertEquals(
+      "[10:10:10] Started movie job: 1 file(s), 1353 blocks\n" +
+        "[10:10:17] Key #1 - Server Busy\n" +
+        "[10:10:19] Key #4 - Daily Quota Exceeded",
+      clipText,
+    )
+    composeTestRule.onNodeWithTag("copy_logs_button").assertTextContains("Copied", substring = true)
+  }
 }

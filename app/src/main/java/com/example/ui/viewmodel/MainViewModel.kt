@@ -355,6 +355,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  fun notifyLogsCopied(lineCount: Int) {
+    _uiMessages.tryEmit("Copied $lineCount log line(s) to clipboard.")
+  }
+
   // --- API Key Manager ---
 
   fun saveBulkApiKeys(

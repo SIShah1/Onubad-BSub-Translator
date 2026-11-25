@@ -1,11 +1,15 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,7 +23,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Preview
 import androidx.compose.material.icons.rounded.Schedule
@@ -27,7 +33,9 @@ import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.WorkHistory
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,10 +47,13 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -62,6 +73,7 @@ import com.example.ui.components.StudioSectionCard
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.LocalThemeController
 import java.util.Locale
+import kotlinx.coroutines.delay
 
 internal enum class FileQueueStatus(val label: String) {
   PENDING("Pending"),
@@ -220,6 +232,9 @@ internal fun FileStatusBadge(
   )
 }
 
+internal fun formatProcessingLogsForClipboard(logs: List<ProcessingLogEntry>): String =
+  logs.joinToString(separator = "\n") { log -> "[${log.timestampLabel}] ${log.message}" }
+
 @Composable
 internal fun LiveProcessingSection(
   sessionState: TranslationSessionState,
@@ -228,6 +243,7 @@ internal fun LiveProcessingSection(
   queuedFiles: List<SelectedSubtitleFile>,
   workInfos: List<WorkInfo>,
   onClearLogs: () -> Unit,
+  onLogsCopied: (Int) -> Unit = {},
   onPreviewFile: (String, SelectedSubtitleFile?) -> Unit = { _, _ -> },
 ) {
   val hasRoomData = roomProgress.totalBlocks > 0
@@ -615,12 +631,21 @@ internal fun LiveProcessingSection(
     val logContainerColor =
       if (isDarkTheme) MaterialTheme.colorScheme.surfaceContainerHighest
       else MaterialTheme.colorScheme.surfaceContainerLow
+    val context = LocalContext.current
+    var copiedFeedback by remember { mutableStateOf(false) }
+
+    LaunchedEffect(copiedFeedback) {
+      if (copiedFeedback) {
+        delay(2_000L)
+        copiedFeedback = false
+      }
+    }
 
     // Persistent Console Log Window
     Surface(
       modifier =
         Modifier.fillMaxWidth()
-          .heightIn(min = 120.dp, max = 240.dp)
+          .heightIn(min = 120.dp, max = 290.dp)
           .testTag("processing_log_container"),
       shape = RoundedCornerShape(14.dp),
       color = logContainerColor,
@@ -638,13 +663,68 @@ internal fun LiveProcessingSection(
           )
         }
       } else {
-        LazyColumn(
-          state = logListState,
-          modifier = Modifier.fillMaxWidth().padding(12.dp),
-          verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-          items(items = sessionState.logs, key = { it.id }) { log ->
-            LogLineRow(log = log)
+        Column(modifier = Modifier.fillMaxWidth()) {
+          Row(
+            modifier =
+              Modifier.fillMaxWidth()
+                .padding(start = 12.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+          ) {
+            Text(
+              text = "Console (${sessionState.logs.size})",
+              style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FilledTonalButton(
+              onClick = {
+                val formatted = formatProcessingLogsForClipboard(sessionState.logs)
+                val clipboard =
+                  context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                clipboard?.setPrimaryClip(
+                  ClipData.newPlainText("BSub Translator Logs", formatted),
+                )
+                copiedFeedback = true
+                onLogsCopied(sessionState.logs.size)
+              },
+              shape = RoundedCornerShape(10.dp),
+              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+              colors =
+                ButtonDefaults.filledTonalButtonColors(
+                  containerColor =
+                    if (copiedFeedback) MaterialTheme.colorScheme.tertiaryContainer
+                    else MaterialTheme.colorScheme.secondaryContainer,
+                  contentColor =
+                    if (copiedFeedback) MaterialTheme.colorScheme.onTertiaryContainer
+                    else MaterialTheme.colorScheme.onSecondaryContainer,
+                ),
+              modifier = Modifier.minimumInteractiveComponentSize().testTag("copy_logs_button"),
+            ) {
+              Icon(
+                imageVector =
+                  if (copiedFeedback) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                contentDescription = if (copiedFeedback) "Logs copied" else "Copy logs",
+                modifier = Modifier.size(14.dp),
+              )
+              Spacer(modifier = Modifier.width(6.dp))
+              Text(
+                text = if (copiedFeedback) "Copied" else "Copy",
+                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+              )
+            }
+          }
+          HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+          LazyColumn(
+            state = logListState,
+            modifier =
+              Modifier.fillMaxWidth()
+                .heightIn(max = 232.dp)
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+          ) {
+            items(items = sessionState.logs, key = { it.id }) { log ->
+              LogLineRow(log = log)
+            }
           }
         }
       }

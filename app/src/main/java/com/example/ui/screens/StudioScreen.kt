@@ -124,6 +124,7 @@ fun StudioScreen(
   onStartTranslation: () -> Unit,
   onAbortTranslation: () -> Unit,
   onClearLogs: () -> Unit,
+  onLogsCopied: (Int) -> Unit = {},
   onImportBulkKeys: (String) -> Unit = {},
   onImportKeysFile: (Uri?) -> Unit = {},
   onPreviewFile: (String, SelectedSubtitleFile?) -> Unit = { _, _ -> },
@@ -434,6 +435,7 @@ fun StudioScreen(
       queuedFiles = formState.activeFiles,
       workInfos = workInfos,
       onClearLogs = onClearLogs,
+      onLogsCopied = onLogsCopied,
       onPreviewFile = onPreviewFile,
     )
 

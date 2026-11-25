@@ -278,6 +278,7 @@ private fun BSubAppRoot(viewModel: MainViewModel) {
                 onStartTranslation = { viewModel.startTranslation() },
                 onAbortTranslation = viewModel::abortTranslation,
                 onClearLogs = viewModel::clearProcessingLogs,
+                onLogsCopied = viewModel::notifyLogsCopied,
                 onPreviewFile = viewModel::openStudioFilePreview,
                 onNavigateToKeys = { navigateToTab(AppDestination.KEYS.route) },
                 onNavigateToEngineSettings = { navigateToTab(AppDestination.KEYS.route) },
