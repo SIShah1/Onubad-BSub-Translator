@@ -13,6 +13,7 @@ data class ChatCompletionRequest(
   @Json(name = "model") val model: String,
   @Json(name = "messages") val messages: List<ChatMessageDto>,
   @Json(name = "temperature") val temperature: Double? = null,
+  @Json(name = "max_tokens") val maxTokens: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)

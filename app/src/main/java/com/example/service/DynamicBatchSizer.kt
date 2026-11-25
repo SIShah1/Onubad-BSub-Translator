@@ -141,7 +141,7 @@ class DynamicBatchSizer(
     if (!enabled) {
       return BatchAdjustmentResult(previous, previous, avg, BatchAdjustmentReason.STEADY)
     }
-    val stepDown = maxOf(10, (previous * 0.25f).roundToInt())
+    val stepDown = maxOf(10, (previous * 0.35f).roundToInt())
     val next = (previous - stepDown).coerceIn(minBatchSize, maxBatchSize)
     currentBatchSize = next
     return BatchAdjustmentResult(

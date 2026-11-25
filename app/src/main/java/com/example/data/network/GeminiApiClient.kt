@@ -50,10 +50,10 @@ class GeminiApiClient(
         }
         extraInterceptors.forEach { addInterceptor(it) }
       }
-      .connectTimeout(30, TimeUnit.SECONDS)
-      .readTimeout(240, TimeUnit.SECONDS)
-      .writeTimeout(60, TimeUnit.SECONDS)
-      .callTimeout(260, TimeUnit.SECONDS)
+      .connectTimeout(20, TimeUnit.SECONDS)
+      .readTimeout(90, TimeUnit.SECONDS)
+      .writeTimeout(30, TimeUnit.SECONDS)
+      .callTimeout(105, TimeUnit.SECONDS)
       .build()
 
   private val providerOkHttpClient: OkHttpClient =
@@ -61,10 +61,10 @@ class GeminiApiClient(
       .apply {
         extraInterceptors.forEach { addInterceptor(it) }
       }
-      .connectTimeout(30, TimeUnit.SECONDS)
-      .readTimeout(240, TimeUnit.SECONDS)
-      .writeTimeout(60, TimeUnit.SECONDS)
-      .callTimeout(260, TimeUnit.SECONDS)
+      .connectTimeout(20, TimeUnit.SECONDS)
+      .readTimeout(90, TimeUnit.SECONDS)
+      .writeTimeout(30, TimeUnit.SECONDS)
+      .callTimeout(105, TimeUnit.SECONDS)
       .build()
 
   private val moshi: Moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()

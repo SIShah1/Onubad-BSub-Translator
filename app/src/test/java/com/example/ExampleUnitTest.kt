@@ -667,4 +667,78 @@ class ExampleUnitTest {
     assertEquals(GrokApiService.BASE_URL, grokService.baseUrl)
     assertEquals(DeepSeekApiService.BASE_URL, deepSeekService.baseUrl)
   }
+
+  @Test
+  fun `lenient model parser and reconcileBatch recover decorated serials variant timestamps and relative numbering`() {
+    val originalBatch =
+      listOf(
+        SrtBlock(151, "00:05:01,000 --> 00:05:03,500", listOf("Line one")),
+        SrtBlock(152, "00:05:04,200 --> 00:05:06,000", listOf("Line two")),
+        SrtBlock(153, "00:05:07,000 --> 00:05:09,500", listOf("Line three")),
+      )
+
+    // Real-world LLM quirks: <think> preamble, unclosed fence, decorated serials, single arrow, 2-digit ms, relative 1..3 numbering
+    val noisyLlmOutput =
+      """
+      <think>Analyzing tone...</think>
+      ```srt
+      1.
+      **00:05:01,000 -> 00:05:03,50**
+      প্রথম সংলাপ
+
+      **2**
+      0:05:04:200 --> 0:05:06.000
+      দ্বিতীয় সংলাপ
+
+      [3]
+      00:05:07,000 ==> 00:05:09,5
+      তৃতীয় সংলাপ
+      """.trimIndent()
+
+    val parsed = SrtEngine.parseModelOutput(noisyLlmOutput, expectedBatch = originalBatch)
+    assertEquals(3, parsed.size)
+
+    val reconciled = SrtEngine.reconcileBatch(originalBatch, parsed)
+    assertTrue("Expected Resolved, got $reconciled", reconciled is BatchReconciliationResult.Resolved)
+    val resolved = reconciled as BatchReconciliationResult.Resolved
+    assertEquals(3, resolved.blocks.size)
+    assertEquals(151, resolved.blocks[0].index)
+    assertEquals("00:05:01,000 --> 00:05:03,500", resolved.blocks[0].timestamp)
+    assertEquals("প্রথম সংলাপ", resolved.blocks[0].lines.first())
+    assertEquals(152, resolved.blocks[1].index)
+    assertEquals("দ্বিতীয় সংলাপ", resolved.blocks[1].lines.first())
+    assertEquals(153, resolved.blocks[2].index)
+    assertEquals("তৃতীয় সংলাপ", resolved.blocks[2].lines.first())
+  }
+
+  @Test
+  fun `generic 429 resource exhausted is treated as recoverable rate limit and deepseek request sets maxTokens`() {
+    val client = GeminiApiClient()
+
+    val generic429 =
+      client.classifyHttpFailure(
+        429,
+        """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted (e.g. check quota)."}}""",
+      )
+    assertTrue(
+      "Expected recoverable RateLimited for generic 429, got $generic429",
+      generic429 is GeminiCallResult.RateLimited,
+    )
+
+    val deepSeekReq =
+      client.buildChatCompletionRequest(
+        model = "deepseek-chat",
+        systemPrompt = "Translate",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.MOVIE,
+        title = "Demo",
+        secondaryMeta = "2026",
+        batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+        batchIndex = 1,
+        totalBatches = 1,
+        fileName = "demo.srt",
+        temperature = 0.3f,
+      )
+    assertEquals(8192, deepSeekReq.maxTokens)
+  }
 }

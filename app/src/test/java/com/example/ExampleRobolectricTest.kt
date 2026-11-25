@@ -3453,4 +3453,96 @@ class ExampleRobolectricTest {
         failedOutcome is com.example.data.storage.SaveValidatedSrtResult.ValidationFailed,
       )
     }
+
+  @Test
+  fun `subtitle translation service preserves partial batch translations and recovers only missing cues`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSyPartialRecKey1_123456789", "Key 1")
+      app.secureKeyStorage.addSingleKey("AIzaSyPartialRecKey2_123456789", "Key 2")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+      app.settingsRepository.setApiProvider(ApiProvider.GEMINI)
+
+      val rawSrt =
+        (1..20).joinToString("\n\n") { idx ->
+          val sec = idx.toString().padStart(2, '0')
+          "$idx\n00:00:$sec,000 --> 00:00:$sec,800\nLine $idx"
+        }
+
+      val requestedCounts = mutableListOf<Int>()
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> = generateContent(model, "", request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            val prompt = request.contents.last().parts.first().text.orEmpty()
+            val blocksInPrompt = com.example.srt.SrtParser.parseBlocks(prompt)
+            requestedCounts.add(blocksInPrompt.size)
+
+            // First call (20 cues) returns only 14 cues (70% < 80%); recovery should only request remaining 6 cues!
+            val replyBlocks =
+              if (blocksInPrompt.size == 20) {
+                blocksInPrompt.take(14).joinToString("\n\n") { b ->
+                  "${b.index}\n${b.timestamp}\nআংশিক ${b.index}"
+                }
+              } else {
+                blocksInPrompt.joinToString("\n\n") { b ->
+                  "${b.index}\n${b.timestamp}\nবাকি ${b.index}"
+                }
+              }
+
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = replyBlocks))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockService)
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val dynamicSizer = DynamicBatchSizer(baseBatchSize = 20, enabled = true, minBatchSize = 10)
+      val result =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "partial_recovery.srt",
+          dynamicBatchSizerOverride = dynamicSizer,
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { minutes ->
+            throw AssertionError("Unexpected cooldown ($minutes m) during partial recovery")
+          },
+        )
+
+      assertTrue("Expected Success, got $result", result is SubtitleTranslationServiceResult.Success)
+      val success = result as SubtitleTranslationServiceResult.Success
+      assertEquals(20, success.translatedBlocks.size)
+      // First 14 cues preserved from first call without re-translating; remaining 6 cues recovered in 2nd call!
+      assertEquals("আংশিক 1", success.translatedBlocks[0].lines.first())
+      assertEquals("আংশিক 14", success.translatedBlocks[13].lines.first())
+      assertEquals("বাকি 15", success.translatedBlocks[14].lines.first())
+      assertEquals("বাকি 20", success.translatedBlocks[19].lines.first())
+      assertEquals(listOf(20, 6), requestedCounts)
+    }
 }

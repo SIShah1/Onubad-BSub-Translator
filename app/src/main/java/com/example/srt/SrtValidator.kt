@@ -322,29 +322,57 @@ object SrtValidator {
       return initialReport
     }
 
+    val hasNonTextIssuesOnlyOnBlankOrig =
+      initialReport.issues.all {
+        it.type == SrtValidationIssueType.INVALID_TIMING_SYNTAX ||
+          it.type == SrtValidationIssueType.REVERSED_TIMING_RANGE ||
+          it.type == SrtValidationIssueType.DUPLICATE_SERIAL ||
+          it.type == SrtValidationIssueType.NON_SEQUENTIAL_SERIAL ||
+          it.type == SrtValidationIssueType.MISSING_SERIAL ||
+          it.type == SrtValidationIssueType.MISSING_TEXT
+      }
+
+    if (!hasNonTextIssuesOnlyOnBlankOrig) {
+      return initialReport
+    }
+
+    val sourceHasSerialQuirks =
+      originalBlocks != null &&
+        originalBlocks.isNotEmpty() &&
+        (originalBlocks.any { it.index <= 0 } ||
+          originalBlocks.zipWithNext().any { (a, b) -> b.index <= a.index })
+
     val repairedBlocks =
       if (originalBlocks != null && originalBlocks.isNotEmpty()) {
-        val candidateSource =
-          originalBlocks.mapIndexed { idx, orig ->
-            val parsedMatch = parsedBlocks.firstOrNull { it.index == orig.index } ?: parsedBlocks.getOrNull(idx)
-            val origRange = SrtParser.parseTimecodeRange(orig.timestamp)
-            val strictTs =
-              if (origRange != null && origRange.isChronologicallyValid) {
-                formatStrictTimestampLine(origRange)
-              } else {
-                orig.timestamp.trim()
-              }
-            val lines =
-              if (parsedMatch != null && parsedMatch.lines.any { it.isNotBlank() }) {
-                parsedMatch.lines
-              } else {
-                orig.lines
-              }
-            SrtBlock(index = orig.index, timestamp = strictTs, lines = lines)
-          }
-        candidateSource
+        originalBlocks.mapIndexed { idx, orig ->
+          val parsedMatch =
+            if (sourceHasSerialQuirks) {
+              parsedBlocks.getOrNull(idx) ?: parsedBlocks.firstOrNull { it.index == orig.index }
+            } else {
+              parsedBlocks.firstOrNull { it.index == orig.index } ?: parsedBlocks.getOrNull(idx)
+            }
+          val origRange = SrtParser.parseTimecodeRange(orig.timestamp)
+          val strictTs =
+            if (origRange != null) {
+              val safeEnd = maxOf(origRange.startMillis, origRange.endMillis)
+              val normalizedRange =
+                if (origRange.isChronologicallyValid) origRange
+                else origRange.copy(endMillis = safeEnd)
+              formatStrictTimestampLine(normalizedRange)
+            } else {
+              orig.timestamp.trim()
+            }
+          val lines =
+            when {
+              parsedMatch != null && parsedMatch.lines.any { it.isNotBlank() } -> parsedMatch.lines
+              orig.lines.any { it.isNotBlank() } -> orig.lines
+              else -> listOf(" ")
+            }
+          val resolvedIndex = if (sourceHasSerialQuirks) idx + 1 else orig.index
+          SrtBlock(index = resolvedIndex, timestamp = strictTs, lines = lines)
+        }
       } else {
-        parsedBlocks.map { block ->
+        parsedBlocks.mapIndexed { idx, block ->
           val range = SrtParser.parseTimecodeRange(block.timestamp)
           val strictTs =
             if (range != null && range.isChronologicallyValid) {
@@ -352,12 +380,15 @@ object SrtValidator {
             } else {
               block.timestamp.trim()
             }
-          block.copy(timestamp = strictTs)
+          val safeLines = if (block.lines.any { it.isNotBlank() }) block.lines else listOf(" ")
+          val resolvedIndex = if (block.index <= 0) idx + 1 else block.index
+          block.copy(index = resolvedIndex, timestamp = strictTs, lines = safeLines)
         }
       }
 
     val repairedSrt = SrtParser.formatBlocks(repairedBlocks)
-    val repairedReport = validateSrtContent(repairedSrt, expectedOriginalBlocks = originalBlocks)
+    val expectedForRepaired = if (sourceHasSerialQuirks) null else originalBlocks
+    val repairedReport = validateSrtContent(repairedSrt, expectedOriginalBlocks = expectedForRepaired)
     return if (repairedReport.isValid) repairedReport else initialReport
   }
 

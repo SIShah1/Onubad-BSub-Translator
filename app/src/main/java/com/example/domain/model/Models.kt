@@ -94,7 +94,7 @@ data class FewShotExample(
 )
 
 object DefaultConfig {
-  const val CHUNK_SIZE = 150
+  const val CHUNK_SIZE = 100
   const val GEMINI_MODEL = "gemini-3.8-flash"
   const val GROK_MODEL = "grok-3-mini"
   const val DEEPSEEK_MODEL = "deepseek-chat"
@@ -109,10 +109,11 @@ object DefaultConfig {
   const val MAX_CONTEXT_LINES = 500
   const val DYNAMIC_BATCH_SIZING = true
   const val DYNAMIC_BATCH_WINDOW = 5
-  const val DYNAMIC_FAST_LATENCY_MS = 3_000L
-  const val DYNAMIC_SLOW_LATENCY_MS = 10_000L
-  const val DYNAMIC_MIN_CHUNK_FLOOR = 25
-  const val DYNAMIC_MAX_CHUNK_CEILING = 400
+  const val DYNAMIC_FAST_LATENCY_MS = 6_000L
+  const val DYNAMIC_SLOW_LATENCY_MS = 22_000L
+  const val DYNAMIC_MIN_CHUNK_FLOOR = 20
+  const val DYNAMIC_MAX_CHUNK_CEILING = 250
+  const val MAX_SLICE_PAYLOAD_CHARS = 14_000
 
   val PRESET_CHUNK_SIZES = listOf(100, 150, 200, 300)
   val PRESET_CONTEXT_LINES = listOf(0, 25, 50, 100, 150)

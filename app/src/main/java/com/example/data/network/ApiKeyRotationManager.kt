@@ -74,7 +74,10 @@ class KeyRotationSession internal constructor(
 
 sealed interface BatchValidationOutcome<out T> {
   data class Valid<T>(val value: T) : BatchValidationOutcome<T>
-  data class Invalid(val reason: String) : BatchValidationOutcome<Nothing>
+  data class Invalid(
+    val reason: String,
+    val failImmediately: Boolean = false,
+  ) : BatchValidationOutcome<Nothing>
 }
 
 sealed interface RotationExecutionResult<out T> {
@@ -307,10 +310,10 @@ class ApiKeyRotationManager(
           session.keys.indices.filter {
             it !in session.invalidIndices && it !in session.dailyQuotaExhaustedIndices
           }
-        val onlyRateLimited =
-          eligibleNonDaily.isNotEmpty() && eligibleNonDaily.all { it in session.rateLimitedIndices }
+        val anyRateLimited =
+          eligibleNonDaily.any { it in session.rateLimitedIndices }
         val effectiveCooldownMinutes =
-          if (onlyRateLimited) {
+          if (anyRateLimited) {
             minOf(cooldownMinutes.coerceAtLeast(1), RATE_LIMIT_COOLDOWN_MAX_MINUTES)
           } else {
             cooldownMinutes.coerceAtLeast(1)
@@ -418,7 +421,8 @@ class ApiKeyRotationManager(
                     .coerceAtLeast(1)
 
                 if (
-                  consecutiveValidationFailures >= MAX_VALIDATION_ATTEMPTS_BEFORE_SPLIT ||
+                  validation.failImmediately ||
+                    consecutiveValidationFailures >= MAX_VALIDATION_ATTEMPTS_BEFORE_SPLIT ||
                     (eligibleCount == 1 && attempt >= safeMaxAttempts)
                 ) {
                   return RotationExecutionResult.Failure(
@@ -441,7 +445,7 @@ class ApiKeyRotationManager(
                   )
                   switchToNextKey = true
                 } else {
-                  val quickWait = minOf(safeRetrySeconds, 3)
+                  val quickWait = minOf(safeRetrySeconds, 2)
                   onStatusLog(
                     "Retrying batch in ${quickWait}s (Attempt ${attempt + 1}/$safeMaxAttempts)",
                     LogLevel.INFO,
@@ -618,9 +622,23 @@ class ApiKeyRotationManager(
               }
             onStatusLog("Key #$keyNum – $shortReason", LogLevel.WARNING)
 
-            if (!isRateLimit && attempt < safeMaxAttempts) {
+            val hasOtherAvailableKeys = session.findNextAvailableIndex((keyIdx + 1) % session.keys.size).let {
+              it != null && it != keyIdx
+            }
+            if (!isRateLimit && !hasOtherAvailableKeys && attempt < safeMaxAttempts) {
               onStatusLog("Retrying in ${safeRetrySeconds}s", LogLevel.INFO)
               onRetryDelay(safeRetrySeconds, "Retrying in")
+            } else if (!isRateLimit && hasOtherAvailableKeys) {
+              onStatusLog(
+                "Key #$keyNum – $shortReason, rotating to next healthy key",
+                LogLevel.WARNING,
+              )
+              rotateToNextAvailableKey(
+                session = session,
+                markCurrentExhausted = true,
+                errorReason = apiResult.reason,
+              )
+              switchToNextKey = true
             } else {
               val reasonMsg =
                 if (isRateLimit) {

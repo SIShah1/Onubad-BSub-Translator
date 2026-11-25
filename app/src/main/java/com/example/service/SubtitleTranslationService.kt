@@ -81,7 +81,8 @@ class SubtitleTranslationService(
 
   companion object {
     private const val MIN_ADAPTIVE_SPLIT_BLOCKS = 4
-    private const val MAX_ADAPTIVE_SPLIT_DEPTH = 3
+    private const val MAX_ADAPTIVE_SPLIT_DEPTH = 4
+    private const val PARTIAL_RECOVERY_MIN_BATCH_SIZE = 13
   }
 
   fun parseAndSegment(
@@ -194,9 +195,29 @@ class SubtitleTranslationService(
     estimatedTotalSegments: Int,
     contextLines: Int = DefaultConfig.CONTEXT_LINES,
     translatedByIndex: Map<Int, SrtBlock> = emptyMap(),
+    maxPayloadChars: Int = Int.MAX_VALUE,
+    minFloorBlocks: Int = DefaultConfig.DYNAMIC_MIN_CHUNK_FLOOR,
   ): SubtitleSegment {
     val safeStart = startIdx.coerceIn(0, allBlocks.size)
-    val safeEnd = (safeStart + batchSize.coerceAtLeast(1)).coerceAtMost(allBlocks.size)
+    val maxEnd = (safeStart + batchSize.coerceAtLeast(1)).coerceAtMost(allBlocks.size)
+    val safeEnd =
+      if (maxPayloadChars < Int.MAX_VALUE && maxEnd - safeStart > minFloorBlocks) {
+        var charBudget = 0
+        var idx = safeStart
+        val guaranteedMinEnd = (safeStart + minFloorBlocks.coerceAtLeast(1)).coerceAtMost(maxEnd)
+        while (idx < maxEnd) {
+          val blockChars =
+            allBlocks[idx].lines.sumOf { it.length } + allBlocks[idx].timestamp.length + 12
+          if (idx >= guaranteedMinEnd && charBudget + blockChars > maxPayloadChars) {
+            break
+          }
+          charBudget += blockChars
+          idx++
+        }
+        idx.coerceAtLeast((safeStart + 1).coerceAtMost(allBlocks.size))
+      } else {
+        maxEnd
+      }
     val sliceBlocks = allBlocks.subList(safeStart, safeEnd)
     val surroundingContext =
       SrtEngine.buildSurroundingContext(
@@ -259,6 +280,8 @@ class SubtitleTranslationService(
     workId: String? = null,
     allBlocks: List<SrtBlock> = emptyList(),
     translatedByIndex: Map<Int, SrtBlock> = emptyMap(),
+    dynamicSizer: DynamicBatchSizer? = null,
+    onSubBatchCompleted: suspend (List<SrtBlock>) -> Unit = {},
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
     onRetryDelay: suspend (seconds: Int, prefix: String) -> Unit = { seconds, _ ->
@@ -287,6 +310,8 @@ class SubtitleTranslationService(
       fileName = fileName,
       workId = workId,
       splitDepth = 0,
+      dynamicSizer = dynamicSizer,
+      onSubBatchCompleted = onSubBatchCompleted,
       onAttemptStarted = onAttemptStarted,
       onStatusLog = onStatusLog,
       onRetryDelay = onRetryDelay,
@@ -310,6 +335,8 @@ class SubtitleTranslationService(
     fileName: String,
     workId: String?,
     splitDepth: Int,
+    dynamicSizer: DynamicBatchSizer?,
+    onSubBatchCompleted: suspend (List<SrtBlock>) -> Unit,
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit,
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit,
     onRetryDelay: suspend (seconds: Int, prefix: String) -> Unit,
@@ -331,6 +358,10 @@ class SubtitleTranslationService(
         splitDepth == 0 -> fallbackContext
         else -> ""
       }
+
+    var bestPartialMatches: Map<Int, SrtBlock> = emptyMap()
+    var bestMissingBlocks: List<SrtBlock> = emptyList()
+
     val outcome =
       keyRotationManager.executeBatchWithRotation(
         session = session,
@@ -354,12 +385,22 @@ class SubtitleTranslationService(
         provider = settings.apiProvider,
         blockCount = blocks.size,
         validateOutput = { rawText ->
-          val parsedOutput = SrtEngine.parseModelOutput(rawText)
+          val parsedOutput = SrtEngine.parseModelOutput(rawText, expectedBatch = blocks)
           when (val reconciled = SrtEngine.reconcileBatch(blocks, parsedOutput)) {
             is BatchReconciliationResult.Resolved ->
               BatchValidationOutcome.Valid(reconciled.blocks)
-            is BatchReconciliationResult.TooIncomplete ->
-              BatchValidationOutcome.Invalid(reconciled.reason)
+            is BatchReconciliationResult.TooIncomplete -> {
+              if (reconciled.matchedBlocks.size > bestPartialMatches.size) {
+                bestPartialMatches = reconciled.matchedBlocks
+                bestMissingBlocks = reconciled.missingBlocks
+              }
+              val isTruncatedLargeBatch =
+                reconciled.matchedCount > 0 && blocks.size >= PARTIAL_RECOVERY_MIN_BATCH_SIZE
+              BatchValidationOutcome.Invalid(
+                reason = reconciled.reason,
+                failImmediately = isTruncatedLargeBatch,
+              )
+            }
           }
         },
         onAttemptStarted = onAttemptStarted,
@@ -368,12 +409,101 @@ class SubtitleTranslationService(
         onCooldownWait = onCooldownWait,
       )
 
+    if (outcome is RotationExecutionResult.Success) {
+      if (splitDepth > 0) {
+        onSubBatchCompleted(outcome.value)
+      }
+      return outcome
+    }
+
     if (
       outcome is RotationExecutionResult.Failure &&
         outcome.isValidationFailure &&
         blocks.size >= MIN_ADAPTIVE_SPLIT_BLOCKS &&
         splitDepth < MAX_ADAPTIVE_SPLIT_DEPTH
     ) {
+      if (splitDepth == 0) {
+        dynamicSizer?.recordTruncation()
+      }
+
+      // Smart partial-progress recovery: keep already-translated cues and only translate the missing remainder
+      val minReusableCount = (blocks.size * 0.35).toInt().coerceAtLeast(1)
+      if (
+        blocks.size >= PARTIAL_RECOVERY_MIN_BATCH_SIZE &&
+          bestPartialMatches.size >= minReusableCount &&
+          bestMissingBlocks.isNotEmpty() &&
+          bestMissingBlocks.size < blocks.size
+      ) {
+        val preservedList = blocks.mapNotNull { bestPartialMatches[it.index] }
+        onStatusLog(
+          "Batch $batchIndex/$totalBatches partial match (${preservedList.size}/${blocks.size} cues preserved); recovering ${bestMissingBlocks.size} missing cues",
+          LogLevel.WARNING,
+        )
+        onSubBatchCompleted(preservedList)
+
+        val updatedTranslated =
+          HashMap(translatedByIndex).apply {
+            preservedList.forEach { put(it.index, it) }
+          }
+
+        val gapChunks = bestMissingBlocks.chunked((blocks.size / 2).coerceIn(15, 60))
+        val recoveredByIndex = HashMap<Int, SrtBlock>(bestMissingBlocks.size)
+        var lastUsedKeyNum = 1
+        var lastUsedKeyLabel = ""
+        var totalLatency = 0L
+        var totalRateLimits = 0
+
+        for (gapChunk in gapChunks) {
+          val gapResult =
+            translateBlockSliceWithRotation(
+              session = session,
+              blocks = gapChunk,
+              sliceStartIndex = sliceStartIndex,
+              allBlocks = allBlocks,
+              translatedByIndex = updatedTranslated,
+              fallbackContext = "",
+              batchIndex = batchIndex,
+              totalBatches = totalBatches,
+              settings = settings,
+              inputMode = inputMode,
+              title = title,
+              secondaryMeta = secondaryMeta,
+              fileName = fileName,
+              workId = workId,
+              splitDepth = splitDepth + 1,
+              dynamicSizer = null,
+              onSubBatchCompleted = onSubBatchCompleted,
+              onAttemptStarted = onAttemptStarted,
+              onStatusLog = onStatusLog,
+              onRetryDelay = onRetryDelay,
+              onCooldownWait = onCooldownWait,
+            )
+          if (gapResult !is RotationExecutionResult.Success) {
+            return gapResult
+          }
+          gapResult.value.forEach { block ->
+            recoveredByIndex[block.index] = block
+            updatedTranslated[block.index] = block
+          }
+          lastUsedKeyNum = gapResult.usedKeyNumber
+          lastUsedKeyLabel = gapResult.usedKeyLabel
+          totalLatency += gapResult.latencyMs
+          totalRateLimits += gapResult.rateLimitHitsInBatch
+        }
+
+        val mergedInOrder =
+          blocks.map { orig ->
+            recoveredByIndex[orig.index] ?: bestPartialMatches[orig.index] ?: orig
+          }
+        return RotationExecutionResult.Success(
+          value = mergedInOrder,
+          usedKeyNumber = lastUsedKeyNum,
+          usedKeyLabel = lastUsedKeyLabel,
+          latencyMs = (totalLatency / gapChunks.size.coerceAtLeast(1)).coerceAtLeast(1L),
+          rateLimitHitsInBatch = totalRateLimits,
+        )
+      }
+
       val mid = blocks.size / 2
       val firstHalf = blocks.subList(0, mid)
       val secondHalf = blocks.subList(mid, blocks.size)
@@ -399,6 +529,8 @@ class SubtitleTranslationService(
           fileName = fileName,
           workId = workId,
           splitDepth = splitDepth + 1,
+          dynamicSizer = null,
+          onSubBatchCompleted = onSubBatchCompleted,
           onAttemptStarted = onAttemptStarted,
           onStatusLog = onStatusLog,
           onRetryDelay = onRetryDelay,
@@ -434,6 +566,8 @@ class SubtitleTranslationService(
           fileName = fileName,
           workId = workId,
           splitDepth = splitDepth + 1,
+          dynamicSizer = null,
+          onSubBatchCompleted = onSubBatchCompleted,
           onAttemptStarted = onAttemptStarted,
           onStatusLog = onStatusLog,
           onRetryDelay = onRetryDelay,
@@ -521,6 +655,9 @@ class SubtitleTranslationService(
           estimatedTotalSegments = estimatedTotal,
           contextLines = settings.effectiveContextLines,
           translatedByIndex = translatedContextMap,
+          maxPayloadChars =
+            if (dynamicSizer != null && chunkSizeOverride == null) DefaultConfig.MAX_SLICE_PAYLOAD_CHARS
+            else Int.MAX_VALUE,
         )
 
       val outcome =
@@ -535,6 +672,7 @@ class SubtitleTranslationService(
           workId = workId,
           allBlocks = parsedBlocks,
           translatedByIndex = translatedContextMap,
+          dynamicSizer = dynamicSizer,
           onStatusLog = onStatusLog,
           onRetryDelay = onRetryDelay,
           onCooldownWait = onCooldownWait,

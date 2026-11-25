@@ -380,18 +380,36 @@ $batchSrtPayload
       }
     }
 
+    val cleanModel = model.trim()
+    val resolvedMaxTokens =
+      when {
+        cleanModel.contains("deepseek-chat", ignoreCase = true) -> 8192
+        cleanModel.contains("deepseek", ignoreCase = true) -> 16384
+        cleanModel.contains("grok", ignoreCase = true) -> 16384
+        else -> 8192
+      }
+
     return ChatCompletionRequest(
-      model = model.trim(),
+      model = cleanModel,
       messages = messages,
       temperature = temperature.toDouble(),
+      maxTokens = resolvedMaxTokens,
     )
   }
+
+  private val THINK_BLOCK_REGEX = Regex("""(?is)<think>.*?</think>""")
+  private val UNCLOSED_THINK_REGEX = Regex("""(?is)<think>.*$""")
+
+  private fun stripReasoningBlocks(raw: String): String =
+    raw
+      .replace(THINK_BLOCK_REGEX, "")
+      .replace(UNCLOSED_THINK_REGEX, "")
+      .trim()
 
   fun extractChatCompletionText(response: ChatCompletionResponse?): String? {
     val raw = response?.choices?.firstOrNull()?.message?.content?.trim().orEmpty()
     if (raw.isBlank()) return null
-    val cleaned = raw.replace(Regex("(?s)<think>.*?</think>"), "").trim()
-    return cleaned.ifBlank { null }
+    return stripReasoningBlocks(raw).ifBlank { null }
   }
 
   fun extractCandidateText(response: GeminiGenerateContentResponse?): String? {
@@ -405,7 +423,7 @@ $batchSrtPayload
         sb.append(text)
       }
     }
-    return sb.toString().trim().ifBlank { null }
+    return stripReasoningBlocks(sb.toString()).ifBlank { null }
   }
 
   fun classifyHttpFailure(code: Int, rawBody: String): GeminiCallResult {
@@ -465,17 +483,20 @@ $batchSrtPayload
         combinedLower.contains("per minute") ||
         combinedLower.contains("tokenspermin") ||
         combinedLower.contains("requestspermin") ||
+        combinedLower.contains("too many requests") ||
         (combinedLower.contains("rate limit") && !combinedLower.contains("perday") && !combinedLower.contains("daily"))
 
     val isDailyQuota =
       combinedLower.contains("perday") ||
         combinedLower.contains("per_day") ||
+        combinedLower.contains("per day") ||
         combinedLower.contains("daily") ||
         combinedLower.contains("requestsperday") ||
+        combinedLower.contains("insufficient_quota") ||
+        combinedLower.contains("insufficient balance") ||
+        combinedLower.contains("exceeded your current quota") ||
         (!isPerMinuteRateLimit &&
-          (combinedLower.contains("quota") ||
-            combinedLower.contains("resource_exhausted") ||
-            combinedLower.contains("limit")))
+          (combinedLower.contains("billing") || combinedLower.contains("credit")))
 
     if (code == 429) {
       return if (isDailyQuota) {

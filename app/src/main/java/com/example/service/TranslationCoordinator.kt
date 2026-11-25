@@ -12,6 +12,7 @@ import com.example.data.preferences.SettingsRepository
 import com.example.data.storage.SaveValidatedSrtResult
 import com.example.data.storage.SubtitleFileStorage
 import com.example.domain.model.AppSettings
+import com.example.domain.model.DefaultConfig
 import com.example.domain.model.InputMode
 import com.example.domain.model.LogLevel
 import com.example.domain.model.ProcessingLogEntry
@@ -456,6 +457,9 @@ class TranslationCoordinator(
               estimatedTotalSegments = dynamicTotalBatches,
               contextLines = settings.effectiveContextLines,
               translatedByIndex = contextTranslatedByIndex,
+              maxPayloadChars =
+                if (settings.dynamicBatchSizingEnabled) DefaultConfig.MAX_SLICE_PAYLOAD_CHARS
+                else Int.MAX_VALUE,
             )
 
           _sessionState.update {
@@ -472,6 +476,7 @@ class TranslationCoordinator(
             LogLevel.INFO,
           )
 
+          val subPersistedIndices = HashSet<Int>(segment.blocks.size)
           val rotationResult =
             subtitleTranslationService.translateSegmentWithRotation(
               session = rotationSession,
@@ -484,6 +489,32 @@ class TranslationCoordinator(
               workId = workId,
               allBlocks = parsedBlocks,
               translatedByIndex = contextTranslatedByIndex,
+              dynamicSizer = dynamicSizer,
+              onSubBatchCompleted = { subBlocks ->
+                val freshBlocks = subBlocks.filter { subPersistedIndices.add(it.index) }
+                if (freshBlocks.isNotEmpty()) {
+                  freshBlocks.forEach { contextTranslatedByIndex[it.index] = it }
+                  subtitleTranslationRepository.markBatchTranslated(
+                    jobId = fileJobId,
+                    translatedBlocks = freshBlocks,
+                  )
+                  completedBlocksAllFiles += freshBlocks.size
+                  val liveFileTranslatedCount =
+                    translatedFileBlocks.size + subPersistedIndices.size
+                  historyRepository.updateBatchProgress(
+                    historyId = historyId,
+                    translatedBlocks = liveFileTranslatedCount,
+                  )
+                  _sessionState.update {
+                    it.copy(
+                      completedBlocksAllFiles = completedBlocksAllFiles,
+                      currentBatchSize = dynamicSizer.currentBatchSize,
+                      activePhaseMessage =
+                        "Batch $displayBatchNum/$dynamicTotalBatches – ${subPersistedIndices.size}/${segment.blocks.size} cues",
+                    )
+                  }
+                }
+              },
               onAttemptStarted = { keyNum, keyLabel, attempt, maxAttempts ->
                 _sessionState.update {
                   it.copy(
@@ -507,10 +538,20 @@ class TranslationCoordinator(
             when (rotationResult) {
               is RotationExecutionResult.Success -> rotationResult
               is RotationExecutionResult.Failure -> {
+                val partialFromSub =
+                  if (subPersistedIndices.isNotEmpty()) {
+                    segment.blocks.mapNotNull { orig ->
+                      if (orig.index in subPersistedIndices) contextTranslatedByIndex[orig.index]
+                      else null
+                    }
+                  } else {
+                    emptyList()
+                  }
+                val preservedForHistory = translatedFileBlocks + partialFromSub
                 finalizeIncompleteHistory(
                   historyId = historyId,
                   file = file,
-                  translatedBlocks = translatedFileBlocks,
+                  translatedBlocks = preservedForHistory,
                   request = request,
                   settings = settings,
                   failureStatus = HistoryTranslationStatus.FAILED,
@@ -540,15 +581,18 @@ class TranslationCoordinator(
 
           translatedFileBlocks.addAll(validatedBlocks)
           validatedBlocks.forEach { contextTranslatedByIndex[it.index] = it }
-          subtitleTranslationRepository.markBatchTranslated(
-            jobId = fileJobId,
-            translatedBlocks = validatedBlocks,
-          )
+          val unpersistedRemainder = validatedBlocks.filter { subPersistedIndices.add(it.index) }
+          if (unpersistedRemainder.isNotEmpty()) {
+            subtitleTranslationRepository.markBatchTranslated(
+              jobId = fileJobId,
+              translatedBlocks = unpersistedRemainder,
+            )
+            completedBlocksAllFiles += unpersistedRemainder.size
+          }
           historyRepository.updateBatchProgress(
             historyId = historyId,
             translatedBlocks = translatedFileBlocks.size,
           )
-          completedBlocksAllFiles += validatedBlocks.size
 
           appendLog(
             "Batch $displayBatchNum/$dynamicTotalBatches – Completed (${successOutcome.latencyMs}ms)",

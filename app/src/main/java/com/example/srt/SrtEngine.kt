@@ -22,6 +22,8 @@ sealed class BatchReconciliationResult {
     val matchedCount: Int,
     val expectedCount: Int,
     val reason: String,
+    val matchedBlocks: Map<Int, SrtBlock> = emptyMap(),
+    val missingBlocks: List<SrtBlock> = emptyList(),
   ) : BatchReconciliationResult()
 }
 
@@ -31,6 +33,14 @@ object SrtEngine {
     Regex("""```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)```""")
   private val CODE_FENCE_OPEN_REGEX = Regex("""^```[a-zA-Z0-9_-]*\s*""")
   private val CODE_FENCE_CLOSE_REGEX = Regex("""\s*```$""")
+  private val THINK_BLOCK_REGEX = Regex("""(?is)<think>.*?</think>""")
+  private val UNCLOSED_THINK_REGEX = Regex("""(?is)<think>.*$""")
+  private val LENIENT_SERIAL_REGEX =
+    Regex("""^\s*(?:cue|block|#)?\s*[\[\(*`]*(\d{1,7})[\]\)*`.:]*\s*$""", RegexOption.IGNORE_CASE)
+  private val LENIENT_TIMECODE_LINE_REGEX =
+    Regex(
+      """^\s*[*`]*(\d{1,3})\s*:\s*([0-5]?\d)\s*:\s*([0-5]?\d)\s*[,.:\s]\s*(\d{1,4})\s*(?:--+>|==+>|—+>|–+>|->)\s*(\d{1,3})\s*:\s*([0-5]?\d)\s*:\s*([0-5]?\d)\s*[,.:\s]\s*(\d{1,4})(?:\s+([^`*]+?))?[*`]*\s*$"""
+    )
 
   fun analyzeFile(
     fileName: String,
@@ -52,8 +62,18 @@ object SrtEngine {
 
   fun parse(rawContent: String): List<SrtBlock> = SrtParser.parseBlocks(rawContent)
 
-  fun parseModelOutput(rawResponse: String): List<SrtBlock> {
-    var cleaned = rawResponse.trim().removePrefix("\uFEFF")
+  fun parseModelOutput(
+    rawResponse: String,
+    expectedBatch: List<SrtBlock> = emptyList(),
+  ): List<SrtBlock> {
+    var cleaned =
+      rawResponse
+        .trim()
+        .removePrefix("\uFEFF")
+        .replace(THINK_BLOCK_REGEX, "")
+        .replace(UNCLOSED_THINK_REGEX, "")
+        .trim()
+
     val fencedMatch = CODE_FENCE_BLOCK_REGEX.find(cleaned)
     if (fencedMatch != null) {
       cleaned = fencedMatch.groupValues[1].trim()
@@ -65,7 +85,133 @@ object SrtEngine {
         cleaned = cleaned.replaceFirst(CODE_FENCE_CLOSE_REGEX, "").trim()
       }
     }
-    return parse(cleaned)
+
+    val strictParsed = parse(cleaned)
+    if (expectedBatch.isEmpty()) {
+      return if (strictParsed.isNotEmpty()) strictParsed else parseLenientModelBlocks(cleaned, expectedBatch)
+    }
+
+    if (strictParsed.size >= expectedBatch.size) {
+      return strictParsed
+    }
+
+    val lenientParsed = parseLenientModelBlocks(cleaned, expectedBatch)
+    return if (lenientParsed.size > strictParsed.size) lenientParsed else strictParsed
+  }
+
+  private fun parseLenientModelBlocks(
+    cleanedText: String,
+    expectedBatch: List<SrtBlock>,
+  ): List<SrtBlock> {
+    val normalized = cleanedText.replace("\r\n", "\n").replace('\r', '\n')
+    if (normalized.isBlank()) return emptyList()
+
+    val lines = normalized.lines()
+    val anchors = ArrayList<Triple<Int, Int, String>>()
+
+    for (lineIdx in 1 until lines.size) {
+      val normalizedTiming = parseLenientTimingLine(lines[lineIdx]) ?: continue
+      val serial = parseLenientSerial(lines[lineIdx - 1]) ?: continue
+      anchors.add(Triple(lineIdx, serial, normalizedTiming))
+    }
+
+    if (anchors.isNotEmpty()) {
+      val blocks = ArrayList<SrtBlock>(anchors.size)
+      for (pos in anchors.indices) {
+        val (timeIdx, serial, normalizedTs) = anchors[pos]
+        val nextTimeIdx = anchors.getOrNull(pos + 1)?.first
+        val contentEnd = if (nextTimeIdx != null) nextTimeIdx - 1 else lines.size
+        val rawContentLines =
+          if (timeIdx + 1 < contentEnd) {
+            lines.subList(timeIdx + 1, contentEnd)
+          } else {
+            emptyList()
+          }
+        val cleanContent =
+          rawContentLines
+            .dropWhile { it.isBlank() }
+            .dropLastWhile { it.isBlank() }
+            .map { it.trimEnd() }
+        blocks.add(
+          SrtBlock(
+            index = serial,
+            timestamp = normalizedTs,
+            lines = cleanContent,
+          )
+        )
+      }
+      return blocks
+    }
+
+    // Fallback: if LLM omitted timestamp lines and emitted `index\ntext` blocks while expectedBatch is known
+    if (expectedBatch.isNotEmpty()) {
+      val expectedByIndex = expectedBatch.associateBy { it.index }
+      val rawChunks = normalized.split(Regex("""\n\s*\n"""))
+      val recovered = ArrayList<SrtBlock>(rawChunks.size)
+      for ((chunkIdx, rawChunk) in rawChunks.withIndex()) {
+        val chunkLines = rawChunk.lines().map { it.trimEnd() }.filter { it.isNotBlank() }
+        if (chunkLines.size < 2) continue
+        val serial = parseLenientSerial(chunkLines[0]) ?: continue
+        val timingFromSecond = parseLenientTimingLine(chunkLines[1])
+        if (timingFromSecond != null && chunkLines.size >= 3) {
+          recovered.add(
+            SrtBlock(
+              index = serial,
+              timestamp = timingFromSecond,
+              lines = chunkLines.drop(2),
+            )
+          )
+        } else {
+          val expected = expectedByIndex[serial] ?: expectedBatch.getOrNull(chunkIdx)
+          if (expected != null) {
+            recovered.add(
+              SrtBlock(
+                index = expected.index,
+                timestamp = expected.timestamp,
+                lines = chunkLines.drop(1),
+              )
+            )
+          }
+        }
+      }
+      if (recovered.isNotEmpty()) {
+        return recovered
+      }
+    }
+
+    return emptyList()
+  }
+
+  private fun parseLenientSerial(line: String): Int? {
+    val clean = line.removePrefix("\uFEFF").trim()
+    clean.toIntOrNull()?.let { return it }
+    val match = LENIENT_SERIAL_REGEX.matchEntire(clean) ?: return null
+    return match.groupValues[1].toIntOrNull()
+  }
+
+  private fun parseLenientTimingLine(line: String): String? {
+    val match = LENIENT_TIMECODE_LINE_REGEX.matchEntire(line.trim()) ?: return null
+    val g = match.groupValues
+    val sh = g[1].padStart(2, '0')
+    val sm = g[2].padStart(2, '0')
+    val ss = g[3].padStart(2, '0')
+    val sms = normalizeMillisToken(g[4])
+    val eh = g[5].padStart(2, '0')
+    val em = g[6].padStart(2, '0')
+    val es = g[7].padStart(2, '0')
+    val ems = normalizeMillisToken(g[8])
+    val trailing = g[9].trim()
+    val base = "$sh:$sm:$ss,$sms --> $eh:$em:$es,$ems"
+    return if (trailing.isBlank()) base else "$base $trailing"
+  }
+
+  private fun normalizeMillisToken(token: String): String {
+    val digits = token.trim()
+    return when {
+      digits.length == 3 -> digits
+      digits.length < 3 -> digits.padEnd(3, '0')
+      else -> digits.take(3)
+    }
   }
 
   fun validateBatch(
@@ -132,10 +278,11 @@ object SrtEngine {
   /**
    * Resilient reconciliation for LLM subtitle responses:
    * 1. Returns strict [ValidationResult.Valid] blocks immediately when exact 1:1 integrity holds.
-   * 2. Otherwise aligns translated blocks by cue index, normalized timestamp, or exact batch size
-   *    position while keeping every original index and timestamp verbatim.
+   * 2. Otherwise aligns translated blocks by cue index, normalized timestamp, relative batch numbering
+   *    (`1..N`), or exact batch size position while keeping every original index and timestamp verbatim.
    * 3. Accepts when >= 80% of blocks matched cleanly (preserving original lines for rare dropped/merged cues);
-   *    returns [BatchReconciliationResult.TooIncomplete] on truncated/garbled output so the caller can split.
+   *    returns [BatchReconciliationResult.TooIncomplete] carrying [matchedBlocks] and [missingBlocks] so
+   *    already-translated cues are never discarded during adaptive recovery.
    */
   fun reconcileBatch(
     originalBatch: List<SrtBlock>,
@@ -155,44 +302,115 @@ object SrtEngine {
             matchedCount = 0,
             expectedCount = originalBatch.size,
             reason = strict.reason,
+            matchedBlocks = emptyMap(),
+            missingBlocks = originalBatch,
           )
         }
 
-        val byIndex = LinkedHashMap<Int, SrtBlock>(translatedBlocks.size)
-        val byTimestamp = LinkedHashMap<String, SrtBlock>(translatedBlocks.size)
-        for (block in translatedBlocks) {
-          byIndex.putIfAbsent(block.index, block)
+        val consumedPos = BooleanArray(translatedBlocks.size)
+        val byIndex = LinkedHashMap<Int, MutableList<Int>>(translatedBlocks.size)
+        val byTimestamp = LinkedHashMap<String, MutableList<Int>>(translatedBlocks.size)
+        for (pos in translatedBlocks.indices) {
+          val block = translatedBlocks[pos]
+          byIndex.getOrPut(block.index) { ArrayList(2) }.add(pos)
           val normTs = SrtParser.normalizeTimestamp(block.timestamp)
           if (normTs.isNotBlank()) {
-            byTimestamp.putIfAbsent(normTs, block)
+            byTimestamp.getOrPut(normTs) { ArrayList(2) }.add(pos)
           }
         }
 
-        val sameSizeFallback = translatedBlocks.size == originalBatch.size
-        var matchedCount = 0
-        val reconciled = ArrayList<SrtBlock>(originalBatch.size)
+        fun takeFirstUnconsumed(positions: List<Int>?): Int? {
+          if (positions == null) return null
+          return positions.firstOrNull { !consumedPos[it] }
+        }
 
+        val aligned = arrayOfNulls<SrtBlock>(originalBatch.size)
+
+        // Pass 1: Match by exact original cue index
         for (i in originalBatch.indices) {
           val original = originalBatch[i]
-          val normOrigTs = SrtParser.normalizeTimestamp(original.timestamp)
-          val candidate =
-            byIndex[original.index]
-              ?: byTimestamp[normOrigTs]
-              ?: if (sameSizeFallback) translatedBlocks[i] else null
-
-          val hasTranslatedText =
-            candidate != null && candidate.lines.any { line -> line.isNotBlank() }
-
-          if (hasTranslatedText) {
-            matchedCount++
-            reconciled.add(
+          val pos = takeFirstUnconsumed(byIndex[original.index]) ?: continue
+          val candidate = translatedBlocks[pos]
+          if (candidate.lines.any { it.isNotBlank() }) {
+            consumedPos[pos] = true
+            aligned[i] =
               SrtBlock(
                 index = original.index,
                 timestamp = original.timestamp,
                 lines = candidate.lines,
               )
-            )
+          }
+        }
+
+        // Pass 2: Match remaining blocks by normalized timestamp
+        for (i in originalBatch.indices) {
+          if (aligned[i] != null) continue
+          val original = originalBatch[i]
+          val normOrigTs = SrtParser.normalizeTimestamp(original.timestamp)
+          val pos = takeFirstUnconsumed(byTimestamp[normOrigTs]) ?: continue
+          val candidate = translatedBlocks[pos]
+          if (candidate.lines.any { it.isNotBlank() }) {
+            consumedPos[pos] = true
+            aligned[i] =
+              SrtBlock(
+                index = original.index,
+                timestamp = original.timestamp,
+                lines = candidate.lines,
+              )
+          }
+        }
+
+        // Pass 3: Relative re-numbering fallback (LLM numbered batch output 1..M instead of K..K+M-1)
+        val firstOrigIdx = originalBatch.first().index
+        if (firstOrigIdx > 1) {
+          for (i in originalBatch.indices) {
+            if (aligned[i] != null) continue
+            val relativeSerial = i + 1
+            val pos = takeFirstUnconsumed(byIndex[relativeSerial]) ?: continue
+            val candidate = translatedBlocks[pos]
+            if (candidate.lines.any { it.isNotBlank() }) {
+              consumedPos[pos] = true
+              aligned[i] =
+                SrtBlock(
+                  index = originalBatch[i].index,
+                  timestamp = originalBatch[i].timestamp,
+                  lines = candidate.lines,
+                )
+            }
+          }
+        }
+
+        // Pass 4: Exact batch-size positional fallback
+        if (translatedBlocks.size == originalBatch.size) {
+          for (i in originalBatch.indices) {
+            if (aligned[i] != null || consumedPos[i]) continue
+            val candidate = translatedBlocks[i]
+            if (candidate.lines.any { it.isNotBlank() }) {
+              consumedPos[i] = true
+              aligned[i] =
+                SrtBlock(
+                  index = originalBatch[i].index,
+                  timestamp = originalBatch[i].timestamp,
+                  lines = candidate.lines,
+                )
+            }
+          }
+        }
+
+        var matchedCount = 0
+        val matchedMap = LinkedHashMap<Int, SrtBlock>(originalBatch.size)
+        val missingList = ArrayList<SrtBlock>()
+        val reconciled = ArrayList<SrtBlock>(originalBatch.size)
+
+        for (i in originalBatch.indices) {
+          val resolvedBlock = aligned[i]
+          val original = originalBatch[i]
+          if (resolvedBlock != null) {
+            matchedCount++
+            matchedMap[original.index] = resolvedBlock
+            reconciled.add(resolvedBlock)
           } else {
+            missingList.add(original)
             reconciled.add(original)
           }
         }
@@ -211,6 +429,8 @@ object SrtEngine {
             matchedCount = matchedCount,
             expectedCount = originalBatch.size,
             reason = "${strict.reason} (aligned $matchedCount/${originalBatch.size} cues)",
+            matchedBlocks = matchedMap,
+            missingBlocks = missingList,
           )
         }
       }
