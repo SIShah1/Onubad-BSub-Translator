@@ -417,6 +417,10 @@ class SubtitleTranslationService(
 
     if (outcome is RotationExecutionResult.Success) {
       if (splitDepth > 0) {
+        onStatusLog(
+          "Batch $batchIndex/$totalBatches sub-slice (${outcome.value.size} cues) translated via Key #${outcome.usedKeyNumber}",
+          LogLevel.SUCCESS,
+        )
         onSubBatchCompleted(outcome.value)
       }
       return outcome

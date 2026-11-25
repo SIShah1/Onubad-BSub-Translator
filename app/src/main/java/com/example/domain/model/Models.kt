@@ -127,7 +127,7 @@ object DefaultConfig {
 
   fun presetModelsFor(provider: ApiProvider): List<String> =
     when (provider) {
-      ApiProvider.GEMINI -> listOf(GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.5-pro")
+      ApiProvider.GEMINI -> listOf(GEMINI_MODEL)
       ApiProvider.GROK -> listOf(GROK_MODEL, "grok-3", "grok-3-fast", "grok-4")
       ApiProvider.DEEPSEEK -> listOf(DEEPSEEK_MODEL, "deepseek-reasoner")
     }

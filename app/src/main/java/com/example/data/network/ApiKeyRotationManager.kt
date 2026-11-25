@@ -43,6 +43,8 @@ class KeyRotationSession internal constructor(
   val exhaustedIndices: MutableSet<Int> = HashSet()
   val dailyQuotaExhaustedIndices: MutableSet<Int> = HashSet()
   val rateLimitedIndices: MutableSet<Int> = HashSet()
+  val consecutive429Failures: MutableMap<Int, Int> = HashMap()
+  val hasSucceededAtLeastOnce: MutableSet<Int> = HashSet()
   val invalidIndices: MutableSet<Int> =
     keys.indices.filterTo(HashSet()) { keys[it].status == ApiKeyStatus.INVALID }
 
@@ -383,6 +385,8 @@ class ApiKeyRotationManager(
           is GeminiCallResult.Success -> {
             when (val validation = validateOutput(apiResult.translatedText)) {
               is BatchValidationOutcome.Valid -> {
+                session.hasSucceededAtLeastOnce.add(keyIdx)
+                session.consecutive429Failures.remove(keyIdx)
                 recordUsageEvent(
                   keyId = activeKey.id,
                   keyLabel = activeKey.label,
@@ -510,6 +514,13 @@ class ApiKeyRotationManager(
             consecutiveValidationFailures = 0
             rateLimitHitsInBatch++
             session.rateLimitedIndices.add(keyIdx)
+            val streak = (session.consecutive429Failures[keyIdx] ?: 0) + 1
+            session.consecutive429Failures[keyIdx] = streak
+            val retireDeadKey =
+              keyIdx !in session.hasSucceededAtLeastOnce && streak >= 3
+            if (retireDeadKey) {
+              session.dailyQuotaExhaustedIndices.add(keyIdx)
+            }
             recordUsageEvent(
               keyId = activeKey.id,
               keyLabel = activeKey.label,
@@ -517,7 +528,9 @@ class ApiKeyRotationManager(
               model = model,
               batchSize = resolvedBlockCount,
               latencyMs = callLatencyMs,
-              outcome = ApiRequestOutcome.RATE_LIMITED,
+              outcome =
+                if (retireDeadKey) ApiRequestOutcome.QUOTA_EXHAUSTED
+                else ApiRequestOutcome.RATE_LIMITED,
               httpCode = 429,
               errorReason = apiResult.reason,
             )
@@ -530,16 +543,29 @@ class ApiKeyRotationManager(
               batchNumber = batchIndex,
               workId = workId,
             )
-            val detail = compactReasonForLog(apiResult.reason)
+            val detail = compactReasonForLog(apiResult.reason, maxLen = 260)
             val rateLog =
-              if (detail.isNotEmpty()) "Key #$keyNum – Rate limit (RPM/TPM): $detail, switching key"
-              else "Key #$keyNum – Rate limit (RPM/TPM), switching key"
-            onStatusLog(rateLog, LogLevel.WARNING)
+              when {
+                retireDeadKey && detail.isNotEmpty() ->
+                  "Key #$keyNum – Retired for run (repeated 429 x$streak, 0 successes): $detail"
+                retireDeadKey ->
+                  "Key #$keyNum – Retired for run (repeated 429 x$streak, 0 successes)"
+                detail.isNotEmpty() ->
+                  "Key #$keyNum – Rate limit (RPM/TPM): $detail, switching key"
+                else ->
+                  "Key #$keyNum – Rate limit (RPM/TPM), switching key"
+              }
+            onStatusLog(rateLog, if (retireDeadKey) LogLevel.ERROR else LogLevel.WARNING)
             rotateToNextAvailableKey(
               session = session,
               markCurrentExhausted = true,
-              errorReason = apiResult.reason,
+              errorReason =
+                if (retireDeadKey) "Repeated 429 quota error across $streak cycles: ${apiResult.reason}"
+                else apiResult.reason,
             )
+            if (session.keys.size > 3 && !retireDeadKey) {
+              delay(350L)
+            }
             switchToNextKey = true
           }
 
@@ -785,7 +811,7 @@ class ApiKeyRotationManager(
       )
   }
 
-  private fun compactReasonForLog(raw: String): String {
+  private fun compactReasonForLog(raw: String, maxLen: Int = 140): String {
     val cleaned =
       raw
         .replace(Regex("""https?://\S+"""), "")
@@ -794,6 +820,6 @@ class ApiKeyRotationManager(
         .removePrefix("Server busy (HTTP 503):")
         .removePrefix("Server busy (HTTP 500):")
         .trim()
-    return if (cleaned.length <= 90) cleaned else "${cleaned.take(87)}..."
+    return if (cleaned.length <= maxLen) cleaned else "${cleaned.take(maxLen - 3)}..."
   }
 }

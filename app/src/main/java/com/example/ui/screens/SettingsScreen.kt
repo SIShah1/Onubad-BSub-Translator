@@ -544,7 +544,7 @@ private fun AdvancedSettingsCard(
           )
           Text(
             text =
-              "Auto-scales batch size up when recent API latency <= 3s and shrinks if slow (>10s) or rate-limited.",
+              "Auto-scales batch size up when recent API latency <= 6s and shrinks if slow (>22s) or rate-limited.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
           )

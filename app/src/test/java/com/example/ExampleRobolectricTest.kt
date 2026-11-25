@@ -3704,4 +3704,125 @@ class ExampleRobolectricTest {
       assertEquals("ওভারলোড ঠিক 30", success.translatedBlocks.last().lines.first())
       assertEquals(listOf(30, 30, 15, 15), requestedCueCounts)
     }
+
+  @Test
+  fun `rotation retires never-succeeding 429 key after 3 streaks and preserves detailed quota log`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSyDeadKey429_123456789", "DeadKey")
+      app.secureKeyStorage.addSingleKey("AIzaSyGoodKey_123456789012", "GoodKey")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+
+      val longQuotaMessage =
+        "Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContentRequestsPerMinutePerProjectPerModel-FreeTier' of service 'generativelanguage.googleapis.com'."
+      var goodKeyCallCount = 0
+      var deadKeyCalls = 0
+      val capturedLogs = mutableListOf<String>()
+
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            if (apiKey.contains("DeadKey")) {
+              deadKeyCalls++
+              return Response.error(
+                429,
+                """{"error":{"status":"RESOURCE_EXHAUSTED","message":"$longQuotaMessage"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+            goodKeyCallCount++
+            // First 2 batches succeed via GoodKey; during batch 3 GoodKey temporarily hits 503 once then succeeds after cooldown
+            if (goodKeyCallCount == 3) {
+              return Response.error(
+                503,
+                """{"error":{"status":"UNAVAILABLE","message":"Model overloaded temporarily"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content =
+                        GeminiContent(
+                          parts = listOf(GeminiPart(text = "1\n00:00:01,000 --> 00:00:02,000\nহ্যালো"))
+                        ),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockService)
+      val manager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val session = manager.prepareSession(ApiProvider.GEMINI)
+
+      // Cycle 1 & 2 succeed on GoodKey; DeadKey gets called on batch 1, wait - manually drive 3 batches where DeadKey is tried 3 times
+      repeat(3) { idx ->
+        // Force DeadKey back into session for batches 1..3 unless retired!
+        if (idx < 2) {
+          session.exhaustedIndices.remove(0)
+          session.currentIndex = 0
+        }
+        val res =
+          manager.executeBatchWithRotation(
+            session = session,
+            model = DefaultConfig.GEMINI_MODEL,
+            temperature = 0.3f,
+            thinkingBudget = 0,
+            systemPrompt = "Translate",
+            fewShotExamples = emptyList(),
+            inputMode = InputMode.MOVIE,
+            title = "Demo",
+            secondaryMeta = "2026",
+            batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHello",
+            batchIndex = idx + 1,
+            totalBatches = 4,
+            fileName = "demo.srt",
+            maxAttemptsPerKey = 1,
+            retryIntervalSeconds = 1,
+            cooldownMinutes = 1,
+            validateOutput = { raw ->
+              com.example.data.network.BatchValidationOutcome.Valid(raw)
+            },
+            onStatusLog = { msg, _ -> capturedLogs.add(msg) },
+            onRetryDelay = { _, _ -> },
+            onCooldownWait = { _ -> },
+          )
+        assertTrue("Expected batch ${idx + 1} to succeed, got $res", res is RotationExecutionResult.Success)
+      }
+
+      // On the 3rd consecutive 429 with 0 successes, DeadKey must be retired in dailyQuotaExhaustedIndices
+      assertTrue(0 in session.dailyQuotaExhaustedIndices)
+      assertEquals(3, deadKeyCalls)
+      assertTrue(
+        "Expected full FreeTier metric suffix in log, got $capturedLogs",
+        capturedLogs.any { it.contains("GenerateContentRequestsPerMinutePerProjectPerModel-FreeTier") },
+      )
+      assertTrue(
+        "Expected retirement message in log, got $capturedLogs",
+        capturedLogs.any { it.contains("Retired for run") },
+      )
+
+      // Resetting temporary cooldowns must keep DeadKey retired on batch 4
+      manager.resetExhaustedAfterCooldown(session)
+      assertEquals(
+        null,
+        session.findNextAvailableIndex(0).takeIf { it == 0 },
+      )
+    }
 }
