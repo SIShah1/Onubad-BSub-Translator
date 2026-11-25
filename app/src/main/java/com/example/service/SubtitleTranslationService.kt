@@ -83,6 +83,7 @@ class SubtitleTranslationService(
     private const val MIN_ADAPTIVE_SPLIT_BLOCKS = 4
     private const val MAX_ADAPTIVE_SPLIT_DEPTH = 4
     private const val PARTIAL_RECOVERY_MIN_BATCH_SIZE = 13
+    private const val OVERLOAD_SPLIT_MIN_BLOCKS = 25
   }
 
   fun parseAndSegment(
@@ -260,6 +261,7 @@ class SubtitleTranslationService(
         temperature = settings.effectiveTemperature,
         thinkingBudget = settings.effectiveThinkingBudget,
         surroundingContext = segment.surroundingContext,
+        model = settings.effectiveModel,
       )
     return PreparedSegmentRequest(
       fileName = fileName,
@@ -362,6 +364,9 @@ class SubtitleTranslationService(
     var bestPartialMatches: Map<Int, SrtBlock> = emptyMap()
     var bestMissingBlocks: List<SrtBlock> = emptyList()
 
+    val canSplitForOverload =
+      blocks.size >= OVERLOAD_SPLIT_MIN_BLOCKS && splitDepth < MAX_ADAPTIVE_SPLIT_DEPTH
+
     val outcome =
       keyRotationManager.executeBatchWithRotation(
         session = session,
@@ -384,6 +389,7 @@ class SubtitleTranslationService(
         surroundingContext = sliceContext,
         provider = settings.apiProvider,
         blockCount = blocks.size,
+        maxCooldownCycles = if (canSplitForOverload) 0 else 2,
         validateOutput = { rawText ->
           val parsedOutput = SrtEngine.parseModelOutput(rawText, expectedBatch = blocks)
           when (val reconciled = SrtEngine.reconcileBatch(blocks, parsedOutput)) {
@@ -416,14 +422,31 @@ class SubtitleTranslationService(
       return outcome
     }
 
-    if (
+    val shouldRecoverBySplitting =
       outcome is RotationExecutionResult.Failure &&
-        outcome.isValidationFailure &&
-        blocks.size >= MIN_ADAPTIVE_SPLIT_BLOCKS &&
-        splitDepth < MAX_ADAPTIVE_SPLIT_DEPTH
-    ) {
+        splitDepth < MAX_ADAPTIVE_SPLIT_DEPTH &&
+        ((outcome.isValidationFailure && blocks.size >= MIN_ADAPTIVE_SPLIT_BLOCKS) ||
+          (outcome.isTransientOverloadOrRateLimit && blocks.size >= OVERLOAD_SPLIT_MIN_BLOCKS))
+
+    if (shouldRecoverBySplitting) {
+      val failure = outcome
       if (splitDepth == 0) {
         dynamicSizer?.recordTruncation()
+      }
+      if (failure.isTransientOverloadOrRateLimit) {
+        if (failure.hadRateLimitedKeys) {
+          onStatusLog(
+            "Batch $batchIndex/$totalBatches overloaded/rate-limited across keys (${blocks.size} cues); cooling 1m before splitting",
+            LogLevel.COOLDOWN,
+          )
+          onCooldownWait(1)
+        } else {
+          onStatusLog(
+            "Batch $batchIndex/$totalBatches timed out/busy across keys (${blocks.size} cues); splitting into smaller halves",
+            LogLevel.WARNING,
+          )
+        }
+        keyRotationManager.resetExhaustedAfterCooldown(session)
       }
 
       // Smart partial-progress recovery: keep already-translated cues and only translate the missing remainder
@@ -507,10 +530,12 @@ class SubtitleTranslationService(
       val mid = blocks.size / 2
       val firstHalf = blocks.subList(0, mid)
       val secondHalf = blocks.subList(mid, blocks.size)
-      onStatusLog(
-        "Batch $batchIndex/$totalBatches truncated (${blocks.size} cues); auto-splitting into ${firstHalf.size} + ${secondHalf.size} cues",
-        LogLevel.WARNING,
-      )
+      if (!failure.isTransientOverloadOrRateLimit) {
+        onStatusLog(
+          "Batch $batchIndex/$totalBatches truncated (${blocks.size} cues); auto-splitting into ${firstHalf.size} + ${secondHalf.size} cues",
+          LogLevel.WARNING,
+        )
+      }
 
       val firstResult =
         translateBlockSliceWithRotation(

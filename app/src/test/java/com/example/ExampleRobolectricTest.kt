@@ -3613,4 +3613,95 @@ class ExampleRobolectricTest {
     )
     composeTestRule.onNodeWithTag("copy_logs_button").assertTextContains("Copied", substring = true)
   }
+
+  @Test
+  fun `subtitle translation service auto-splits large batch when all keys hit 503 or timeout`() =
+    runBlocking {
+      app.secureKeyStorage.clearAllKeys()
+      app.secureKeyStorage.addSingleKey("AIzaSyOverloadSplitKey1_123456", "Key 1")
+      app.secureKeyStorage.addSingleKey("AIzaSyOverloadSplitKey2_123456", "Key 2")
+      app.secureKeyStorage.setActiveKeyIndex(0)
+      app.settingsRepository.setChunkSize(ParamMode.MANUAL, 30)
+      app.settingsRepository.setMaxAttemptsPerKey(ParamMode.MANUAL, 1)
+
+      val rawSrt =
+        (1..30).joinToString("\n\n") { idx ->
+          val startSec = idx.toString().padStart(2, '0')
+          val endSec = (idx + 1).toString().padStart(2, '0')
+          "$idx\n00:00:$startSec,000 --> 00:00:$endSec,000\nOverload line $idx"
+        }
+
+      val requestedCueCounts = mutableListOf<Int>()
+      val mockService =
+        object : GeminiApiService {
+          override suspend fun generateContentWithKeyRotation(
+            model: String,
+            request: GeminiGenerateContentRequest,
+            autoRotate: String,
+          ): Response<GeminiGenerateContentResponse> =
+            generateContent(model = model, apiKey = "", request = request)
+
+          override suspend fun generateContent(
+            model: String,
+            apiKey: String,
+            request: GeminiGenerateContentRequest,
+          ): Response<GeminiGenerateContentResponse> {
+            val prompt = request.contents.last().parts.first().text.orEmpty()
+            val blocksInPrompt = com.example.srt.SrtParser.parseBlocks(prompt)
+            requestedCueCounts.add(blocksInPrompt.size)
+
+            if (blocksInPrompt.size >= 30) {
+              return Response.error(
+                503,
+                """{"error":{"status":"UNAVAILABLE","message":"The model is overloaded"}}"""
+                  .toResponseBody("application/json".toMediaType()),
+              )
+            }
+
+            val replyBlocks =
+              blocksInPrompt.joinToString("\n\n") { b ->
+                "${b.index}\n${b.timestamp}\nওভারলোড ঠিক ${b.index}"
+              }
+            return Response.success(
+              GeminiGenerateContentResponse(
+                candidates =
+                  listOf(
+                    GeminiCandidate(
+                      content = GeminiContent(parts = listOf(GeminiPart(text = replyBlocks))),
+                      finishReason = "STOP",
+                    )
+                  )
+              )
+            )
+          }
+        }
+
+      val apiClient = GeminiApiClient(customService = mockService)
+      val rotationManager = ApiKeyRotationManager(app.secureKeyStorage, apiClient)
+      val service =
+        SubtitleTranslationService(
+          settingsRepository = app.settingsRepository,
+          fileStorage = app.subtitleFileStorage,
+          geminiApiClient = apiClient,
+          keyRotationManager = rotationManager,
+        )
+
+      val result =
+        service.translateSrtContentWithRotation(
+          rawSrtContent = rawSrt,
+          fileName = "overload_split.srt",
+          chunkSizeOverride = 30,
+          onRetryDelay = { _, _ -> },
+          onCooldownWait = { minutes ->
+            throw AssertionError("Unexpected cooldown ($minutes m) when only 503 overload occurred")
+          },
+        )
+
+      assertTrue("Expected Success after overload split, got $result", result is SubtitleTranslationServiceResult.Success)
+      val success = result as SubtitleTranslationServiceResult.Success
+      assertEquals(30, success.translatedBlocks.size)
+      assertEquals("ওভারলোড ঠিক 1", success.translatedBlocks.first().lines.first())
+      assertEquals("ওভারলোড ঠিক 30", success.translatedBlocks.last().lines.first())
+      assertEquals(listOf(30, 30, 15, 15), requestedCueCounts)
+    }
 }

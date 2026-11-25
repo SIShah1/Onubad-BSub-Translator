@@ -741,4 +741,53 @@ class ExampleUnitTest {
       )
     assertEquals(8192, deepSeekReq.maxTokens)
   }
+
+  @Test
+  fun `zero thinking budget explicitly sends thinkingBudget 0 for flash models and 429 limit 0 classifies as QuotaExhausted`() {
+    val client = GeminiApiClient()
+
+    val flashReq =
+      client.buildRequestBody(
+        systemPrompt = "Translate",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.MOVIE,
+        title = "Demo",
+        secondaryMeta = "2026",
+        batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+        batchIndex = 1,
+        totalBatches = 1,
+        fileName = "demo.srt",
+        temperature = 0.3f,
+        thinkingBudget = 0,
+        model = "gemini-3.8-flash",
+      )
+    assertEquals(0, flashReq.generationConfig?.thinkingConfig?.thinkingBudget)
+
+    val proReq =
+      client.buildRequestBody(
+        systemPrompt = "Translate",
+        fewShotExamples = emptyList(),
+        inputMode = InputMode.MOVIE,
+        title = "Demo",
+        secondaryMeta = "2026",
+        batchSrtPayload = "1\n00:00:01,000 --> 00:00:02,000\nHi",
+        batchIndex = 1,
+        totalBatches = 1,
+        fileName = "demo.srt",
+        temperature = 0.3f,
+        thinkingBudget = 0,
+        model = "gemini-2.5-pro",
+      )
+    assertEquals(null, proReq.generationConfig?.thinkingConfig)
+
+    val zeroLimit429 =
+      client.classifyHttpFailure(
+        429,
+        """{"error":{"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3.8-flash"}}""",
+      )
+    assertTrue(
+      "Expected QuotaExhausted for limit: 0, got $zeroLimit429",
+      zeroLimit429 is GeminiCallResult.QuotaExhausted,
+    )
+  }
 }

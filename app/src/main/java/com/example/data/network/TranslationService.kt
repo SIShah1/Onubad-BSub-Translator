@@ -73,6 +73,7 @@ class GeminiTranslationService(
           temperature = request.temperature,
           thinkingBudget = request.thinkingBudget,
           surroundingContext = request.surroundingContext,
+          model = cleanModel,
         )
       TranslationProtocolMapper.executeCall(providerName = provider.displayName) {
         val response =
@@ -81,7 +82,28 @@ class GeminiTranslationService(
             apiKey = apiKey,
             request = requestBody,
           )
-        TranslationProtocolMapper.handleGeminiResponse(response)
+        val firstResult = TranslationProtocolMapper.handleGeminiResponse(response)
+        if (
+          firstResult is GeminiCallResult.FatalError &&
+            firstResult.httpCode == 400 &&
+            requestBody.generationConfig?.thinkingConfig != null &&
+            request.thinkingBudget <= 0 &&
+            firstResult.reason.contains("thinking", ignoreCase = true)
+        ) {
+          val fallbackBody =
+            requestBody.copy(
+              generationConfig = requestBody.generationConfig.copy(thinkingConfig = null)
+            )
+          val retryResponse =
+            apiService.generateContent(
+              model = cleanModel,
+              apiKey = apiKey,
+              request = fallbackBody,
+            )
+          TranslationProtocolMapper.handleGeminiResponse(retryResponse)
+        } else {
+          firstResult
+        }
       }
     }
 }
@@ -235,6 +257,7 @@ internal object TranslationProtocolMapper {
     temperature: Float,
     thinkingBudget: Int,
     surroundingContext: String = "",
+    model: String = "",
   ): GeminiGenerateContentRequest {
     val contextHeader =
       buildString {
@@ -322,10 +345,18 @@ $batchSrtPayload
       )
     )
 
+    val resolvedThinkingConfig =
+      when {
+        thinkingBudget > 0 -> GeminiThinkingConfig(thinkingBudget)
+        thinkingBudget == 0 && !model.contains("pro", ignoreCase = true) ->
+          GeminiThinkingConfig(0)
+        else -> null
+      }
+
     val generationConfig =
       GeminiGenerationConfig(
         temperature = temperature.toDouble(),
-        thinkingConfig = if (thinkingBudget > 0) GeminiThinkingConfig(thinkingBudget) else null,
+        thinkingConfig = resolvedThinkingConfig,
       )
 
     return GeminiGenerateContentRequest(
@@ -399,6 +430,7 @@ $batchSrtPayload
 
   private val THINK_BLOCK_REGEX = Regex("""(?is)<think>.*?</think>""")
   private val UNCLOSED_THINK_REGEX = Regex("""(?is)<think>.*$""")
+  private val ZERO_QUOTA_LIMIT_REGEX = Regex("""\blimit\s*:\s*0\b""")
 
   private fun stripReasoningBlocks(raw: String): String =
     raw
@@ -486,8 +518,13 @@ $batchSrtPayload
         combinedLower.contains("too many requests") ||
         (combinedLower.contains("rate limit") && !combinedLower.contains("perday") && !combinedLower.contains("daily"))
 
+    val isZeroQuotaLimit =
+      ZERO_QUOTA_LIMIT_REGEX.containsMatchIn(combinedLower) ||
+        combinedLower.contains("\"limit\":\"0\"")
+
     val isDailyQuota =
-      combinedLower.contains("perday") ||
+      isZeroQuotaLimit ||
+        combinedLower.contains("perday") ||
         combinedLower.contains("per_day") ||
         combinedLower.contains("per day") ||
         combinedLower.contains("daily") ||

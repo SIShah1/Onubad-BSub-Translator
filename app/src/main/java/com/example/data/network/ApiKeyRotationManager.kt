@@ -92,6 +92,8 @@ sealed interface RotationExecutionResult<out T> {
   data class Failure(
     val fatalError: String,
     val isValidationFailure: Boolean = false,
+    val isTransientOverloadOrRateLimit: Boolean = false,
+    val hadRateLimitedKeys: Boolean = false,
   ) : RotationExecutionResult<Nothing>
 }
 
@@ -255,6 +257,7 @@ class ApiKeyRotationManager(
     surroundingContext: String = "",
     provider: ApiProvider = session.provider,
     blockCount: Int = 0,
+    maxCooldownCycles: Int = MAX_COOLDOWN_CYCLES,
     validateOutput: (String) -> BatchValidationOutcome<T>,
     onAttemptStarted: suspend (keyNumber: Int, keyLabel: String, attempt: Int, maxAttempts: Int) -> Unit = { _, _, _, _ -> },
     onStatusLog: suspend (message: String, level: LogLevel) -> Unit = { _, _ -> },
@@ -299,9 +302,20 @@ class ApiKeyRotationManager(
 
       val selected = getCurrentAvailableKey(session)
       if (selected == null) {
-        if (cooldownCycles >= MAX_COOLDOWN_CYCLES) {
+        if (cooldownCycles >= maxCooldownCycles.coerceAtLeast(0)) {
+          val eligibleNonDaily =
+            session.keys.indices.filter {
+              it !in session.invalidIndices && it !in session.dailyQuotaExhaustedIndices
+            }
           return RotationExecutionResult.Failure(
-            "Translation stopped after $MAX_COOLDOWN_CYCLES cooldown cycles: all keys remained rate-limited or busy."
+            fatalError =
+              if (maxCooldownCycles <= 0) {
+                "All healthy keys hit timeout, busy, or rate-limit on batch $batchIndex/$totalBatches."
+              } else {
+                "Translation stopped after $maxCooldownCycles cooldown cycles: all keys remained rate-limited or busy."
+              },
+            isTransientOverloadOrRateLimit = eligibleNonDaily.isNotEmpty(),
+            hadRateLimitedKeys = eligibleNonDaily.any { it in session.rateLimitedIndices },
           )
         }
         cooldownCycles++
@@ -479,7 +493,11 @@ class ApiKeyRotationManager(
               batchNumber = batchIndex,
               workId = workId,
             )
-            onStatusLog("Key #$keyNum – Daily Quota Exceeded", LogLevel.ERROR)
+            val detail = compactReasonForLog(apiResult.reason)
+            val quotaLog =
+              if (detail.isNotEmpty()) "Key #$keyNum – Quota Exceeded ($detail)"
+              else "Key #$keyNum – Daily Quota Exceeded"
+            onStatusLog(quotaLog, LogLevel.ERROR)
             rotateToNextAvailableKey(
               session = session,
               markCurrentExhausted = true,
@@ -512,7 +530,11 @@ class ApiKeyRotationManager(
               batchNumber = batchIndex,
               workId = workId,
             )
-            onStatusLog("Key #$keyNum – Rate limit (RPM/TPM), switching key", LogLevel.WARNING)
+            val detail = compactReasonForLog(apiResult.reason)
+            val rateLog =
+              if (detail.isNotEmpty()) "Key #$keyNum – Rate limit (RPM/TPM): $detail, switching key"
+              else "Key #$keyNum – Rate limit (RPM/TPM), switching key"
+            onStatusLog(rateLog, LogLevel.WARNING)
             rotateToNextAvailableKey(
               session = session,
               markCurrentExhausted = true,
@@ -616,9 +638,10 @@ class ApiKeyRotationManager(
                 apiResult.httpCode == 503 ||
                 apiResult.httpCode == 500
               ) {
-                "Server Busy"
+                val detail = compactReasonForLog(apiResult.reason)
+                if (detail.isNotEmpty()) "Server Busy ($detail)" else "Server Busy"
               } else {
-                apiResult.reason.take(64)
+                compactReasonForLog(apiResult.reason).ifBlank { apiResult.reason.take(64) }
               }
             onStatusLog("Key #$keyNum – $shortReason", LogLevel.WARNING)
 
@@ -760,5 +783,17 @@ class ApiKeyRotationManager(
         invalidCount = session.invalidIndices.size,
         inCooldown = inCooldown,
       )
+  }
+
+  private fun compactReasonForLog(raw: String): String {
+    val cleaned =
+      raw
+        .replace(Regex("""https?://\S+"""), "")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+        .removePrefix("Server busy (HTTP 503):")
+        .removePrefix("Server busy (HTTP 500):")
+        .trim()
+    return if (cleaned.length <= 90) cleaned else "${cleaned.take(87)}..."
   }
 }

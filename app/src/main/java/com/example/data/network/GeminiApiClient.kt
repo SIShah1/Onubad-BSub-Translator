@@ -228,6 +228,7 @@ class GeminiApiClient(
     temperature: Float,
     thinkingBudget: Int,
     surroundingContext: String = "",
+    model: String = "",
   ): GeminiGenerateContentRequest =
     TranslationProtocolMapper.buildGeminiRequestBody(
       systemPrompt = systemPrompt,
@@ -242,6 +243,7 @@ class GeminiApiClient(
       temperature = temperature,
       thinkingBudget = thinkingBudget,
       surroundingContext = surroundingContext,
+      model = model,
     )
 
   internal fun buildChatCompletionRequest(
